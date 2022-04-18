@@ -1,0 +1,9 @@
+# Binary
+chirpstack-v3-to-v4
+
+# Hidden files
+.*
+!.gitignore
+
+# Config files
+*.toml
