@@ -26,3 +26,6 @@ Usage example:
 	--as-config-file /etc/chirpstack-application-server/chirpstack-application-server.toml \
 	--ns-config-file /etc/chirpstack-network-server/chirpstack-network-server.toml
 ```
+
+**Warning:** only run this against an empty ChirpStack v4 database as this utilty
+will drop all tenants and users from the ChirpStack v4 database.
