@@ -259,7 +259,7 @@ func migrateUsers() {
 			user.IsActive,
 			user.Email,
 			user.EmailVerified,
-			user.PasswordHash,
+			migratePassword(user.PasswordHash),
 			user.Note,
 		)
 		if err != nil {
@@ -1094,4 +1094,22 @@ func (l *GPSPoint) Scan(src interface{}) error {
 
 	_, err := fmt.Sscanf(string(b), "(%f,%f)", &l.Latitude, &l.Longitude)
 	return err
+}
+
+func migratePassword(s string) string {
+	// old:
+	// PBKDF2$sha512$1$l8zGKtxRESq3PA2kFhHRWA==$H3lGMxOt55wjwoc+myeOoABofJY9oDpldJa7fhqdjbh700V6FLPML75UmBOt9J5VFNjAL1AvqCozA1HJM0QVGA==
+
+	// new:
+	// $pbkdf2-sha512$i=1,l=64$l8zGKtxRESq3PA2kFhHRWA$H3lGMxOt55wjwoc+myeOoABofJY9oDpldJa7fhqdjbh700V6FLPML75UmBOt9J5VFNjAL1AvqCozA1HJM0QVGA
+	if s == "" {
+		return s
+	}
+
+	parts := strings.SplitN(s, "$", 5)
+	if len(parts) != 5 {
+		panic("Invalid password hash " + s)
+	}
+
+	return fmt.Sprintf("$pbkdf2-%s$i=$%s,l=16$%s$%s", parts[1], parts[2], parts[3], parts[4])
 }
