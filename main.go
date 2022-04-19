@@ -361,7 +361,6 @@ func migrateOrganizationUsers() {
 			panic(err)
 		}
 	}
-
 }
 
 func migrateApplications() {
@@ -550,6 +549,8 @@ func migrateDeviceProfiles() {
 			panic(err)
 		}
 
+		codecJS := strings.TrimPrefix(asDP.PayloadCodec, "CUSTOM_")
+
 		_, err = csDB.Exec(`
 			insert into device_profile (
 				id,
@@ -589,7 +590,7 @@ func migrateDeviceProfiles() {
 			nsDP.MACVersion,
 			nsDP.RegParamsRevision,
 			nsDP.ADRAlgorithmID,
-			asDP.PayloadCodec,
+			codecJS,
 			asDP.PayloadEncoderScript,
 			asDP.PayloadDecoderScript,
 			asDP.UplinkInterval/time.Second,
@@ -612,7 +613,6 @@ func migrateDeviceProfiles() {
 			panic(err)
 		}
 	}
-
 }
 
 func migrateDevices() {
@@ -837,7 +837,6 @@ func getDeviceSession(devEUI []byte) (pbnew.DeviceSession, error) {
 		} else {
 			panic(err)
 		}
-
 	}
 
 	err = proto.Unmarshal(val, &dsOld)
@@ -957,7 +956,6 @@ func getDeviceGateway(devEUI []byte) (pbnew.DeviceGatewayRxInfo, error) {
 		} else {
 			panic(err)
 		}
-
 	}
 
 	err = proto.Unmarshal(val, &devGWOld)
@@ -1113,5 +1111,5 @@ func migratePassword(s string) string {
 		panic("Invalid password hash " + s)
 	}
 
-	return fmt.Sprintf("$pbkdf2-%s$i=$%s,l=16$%s$%s", parts[1], parts[2], parts[3], parts[4])
+	return fmt.Sprintf("$pbkdf2-%s$i=%s,l=64$%s$%s", parts[1], parts[2], strings.TrimSuffix(parts[3], "=="), strings.TrimSuffix(parts[4], "=="))
 }
