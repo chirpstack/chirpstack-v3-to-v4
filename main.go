@@ -27,10 +27,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var asConfigFile string
-var csConfigFile string
-var nsConfigFiles []string
-var csSessionTTL int
+var (
+	asConfigFile  string
+	csConfigFile  string
+	nsConfigFiles []string
+	csSessionTTL  int
+)
 
 var (
 	nsDB     *sqlx.DB
@@ -474,7 +476,7 @@ func migrateGateways() {
 			intToUUID(asGateway.OrganizationID),
 			asGateway.CreatedAt,
 			asGateway.UpdatedAt,
-			asGateway.LastPingSentAt,
+			asGateway.LastSeenAt,
 			asGateway.Name,
 			asGateway.Description,
 			asGateway.Latitude,
