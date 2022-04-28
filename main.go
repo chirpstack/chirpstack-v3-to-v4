@@ -548,6 +548,27 @@ func migrateDeviceProfiles() {
 			panic(err)
 		}
 
+		codecScript := ""
+		if asDP.PayloadDecoderScript != "" {
+			codecScript = fmt.Sprintf(`
+// v3 to v4 compatibility wrapper
+function decodeUplink(input) {
+	return {
+		object: Decode(input.fPort, input.bytes, input.variables)
+	};
+}
+
+function encodeDownlink(input) {
+	return {
+		data: Encode(input.fPort, input.data, input.variables)
+	};
+}
+
+%s
+
+%s`, asDP.PayloadDecoderScript, asDP.PayloadEncoderScript)
+		}
+
 		_, err = csDB.Exec(`
 			insert into device_profile (
 				id,
@@ -560,8 +581,7 @@ func migrateDeviceProfiles() {
 				reg_params_revision,
 				adr_algorithm_id,
 				payload_codec_runtime,
-				payload_encoder_config,
-				payload_decoder_config,
+				payload_codec_script,
 				uplink_interval,
 				supports_otaa,
 				supports_class_b,
@@ -576,7 +596,8 @@ func migrateDeviceProfiles() {
 				abp_rx2_dr,
 				abp_rx2_freq,
 				tags,
-				device_status_req_interval
+				device_status_req_interval,
+				flush_queue_on_activate
 			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
 			nsDP.ID,
 			intToUUID(asDP.OrganizationID),
@@ -588,8 +609,7 @@ func migrateDeviceProfiles() {
 			nsDP.RegParamsRevision,
 			nsDP.ADRAlgorithmID,
 			asDP.PayloadCodec,
-			asDP.PayloadEncoderScript,
-			asDP.PayloadDecoderScript,
+			codecScript,
 			asDP.UplinkInterval/time.Second,
 			nsDP.SupportsJoin,
 			nsDP.SupportsClassB,
@@ -604,7 +624,8 @@ func migrateDeviceProfiles() {
 			nsDP.RXDataRate2,
 			nsDP.RXFreq2,
 			hstoreToJSON(asDP.Tags),
-			0,
+			1,
+			true,
 		)
 		if err != nil {
 			panic(err)
