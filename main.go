@@ -20,6 +20,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/gofrs/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 	"github.com/lib/pq/hstore"
 	"github.com/spf13/cobra"
@@ -474,7 +475,7 @@ func migrateGateways() {
 			intToUUID(asGateway.OrganizationID),
 			asGateway.CreatedAt,
 			asGateway.UpdatedAt,
-			asGateway.LastPingSentAt,
+			asGateway.LastSeenAt,
 			asGateway.Name,
 			asGateway.Description,
 			asGateway.Latitude,
@@ -741,6 +742,9 @@ func migrateDevices() {
 			panic(err)
 		}
 
+		// Migrate device keys
+		migrateDeviceKeys(asDEV.DevEUI)
+
 		// Migrate device queue
 		migrateDeviceQueue(asDEV.DevEUI, asDEV.AppSKey)
 
@@ -748,7 +752,7 @@ func migrateDevices() {
 		migrateDeviceMetrics(dev.DevEUI)
 
 		// Device session
-		ds, err := getDeviceSession(dev.DevEUI)
+		ds, err := getDeviceSession(dev.DevEUI, asDEV.AppSKey)
 		if err != nil {
 			// Device-session not found error
 			continue
@@ -762,6 +766,55 @@ func migrateDevices() {
 		}
 		saveDeviceGateway(devGW)
 	}
+}
+
+func migrateDeviceKeys(devEUI []byte) {
+	log.Println("Migrating device-keys")
+
+	type DeviceKeys struct {
+		CreatedAt time.Time `db:"created_at"`
+		UpdatedAt time.Time `db:"updated_at"`
+		DevEUI    []byte    `db:"dev_eui"`
+		NwkKey    []byte    `db:"nwk_key"`
+		AppKey    []byte    `db:"app_key"`
+		JoinNonce int       `db:"join_nonce"`
+	}
+	deviceKeys := []DeviceKeys{}
+	err := asDB.Select(&deviceKeys, "select * from device_keys where dev_eui = $1", devEUI)
+	if err != nil {
+		panic(err)
+	}
+
+	devNonces := []int64{}
+	err = nsDB.Select(&devNonces, "select dev_nonce from device_activation where dev_eui = $1", devEUI)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, dk := range deviceKeys {
+		_, err = csDB.Exec(`
+			insert into device_keys (
+				dev_eui,
+				created_at,
+				updated_at,
+				nwk_key,
+				app_key,
+				dev_nonces,
+				join_nonce
+			) values ($1, $2, $3, $4, $5, $6, $7)`,
+			dk.DevEUI,
+			dk.CreatedAt,
+			dk.UpdatedAt,
+			dk.NwkKey,
+			dk.AppKey,
+			pq.Int64Array(devNonces),
+			dk.JoinNonce,
+		)
+		if err != nil {
+			panic(err)
+		}
+	}
+
 }
 
 func migrateDeviceQueue(devEUI []byte, appSKeyB []byte) {
@@ -845,7 +898,7 @@ func hstoreToJSON(h hstore.Hstore) string {
 	return string(b)
 }
 
-func getDeviceSession(devEUI []byte) (pbnew.DeviceSession, error) {
+func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error) {
 	key := fmt.Sprintf("%slora:ns:device:%s", nsPrefix, hex.EncodeToString(devEUI))
 	var dsOld pbold.DeviceSessionPB
 
@@ -872,8 +925,8 @@ func getDeviceSession(devEUI []byte) (pbnew.DeviceSession, error) {
 		SNwkSIntKey: dsOld.SNwkSIntKey,
 		NwkSEncKey:  dsOld.NwkSEncKey,
 		AppSKey: &pbnew.KeyEnvelope{
-			KekLabel: dsOld.GetAppSKeyEnvelope().GetKekLabel(),
-			AesKey:   dsOld.GetAppSKeyEnvelope().GetAesKey(),
+			KekLabel: "",
+			AesKey:   appSKey,
 		},
 		FCntUp:                      dsOld.FCntUp,
 		NFCntDown:                   dsOld.NFCntDown,
@@ -944,8 +997,8 @@ func getDeviceSession(devEUI []byte) (pbnew.DeviceSession, error) {
 }
 
 func saveDeviceSession(ds pbnew.DeviceSession) {
-	devAddrKey := fmt.Sprintf("%sdevaddr:%s", csPrefix, hex.EncodeToString(ds.DevAddr))
-	devSessKey := fmt.Sprintf("%sdevice:%s:ds", csPrefix, hex.EncodeToString(ds.DevEui))
+	devAddrKey := fmt.Sprintf("%sdevaddr:{%s}", csPrefix, hex.EncodeToString(ds.DevAddr))
+	devSessKey := fmt.Sprintf("%sdevice:{%s}:ds", csPrefix, hex.EncodeToString(ds.DevEui))
 
 	b, err := proto.Marshal(&ds)
 	if err != nil {
@@ -953,7 +1006,7 @@ func saveDeviceSession(ds pbnew.DeviceSession) {
 	}
 
 	pipe := csRedis.TxPipeline()
-	pipe.SAdd(context.Background(), devAddrKey, hex.EncodeToString(ds.DevEui))
+	pipe.SAdd(context.Background(), devAddrKey, ds.DevEui)
 	pipe.PExpire(context.Background(), devAddrKey, time.Duration(csSessionTTL)*time.Hour*24)
 	if _, err := pipe.Exec(context.Background()); err != nil {
 		panic(err)
@@ -1005,7 +1058,7 @@ func getDeviceGateway(devEUI []byte) (pbnew.DeviceGatewayRxInfo, error) {
 }
 
 func saveDeviceGateway(devGW pbnew.DeviceGatewayRxInfo) {
-	key := fmt.Sprintf("%sdevice:%s:gwrx", nsPrefix, hex.EncodeToString(devGW.DevEui))
+	key := fmt.Sprintf("%sdevice:{%s}:gwrx", nsPrefix, hex.EncodeToString(devGW.DevEui))
 	b, err := proto.Marshal(&devGW)
 	if err != nil {
 		panic(err)
@@ -1132,5 +1185,5 @@ func migratePassword(s string) string {
 		panic("Invalid password hash " + s)
 	}
 
-	return fmt.Sprintf("$pbkdf2-%s$i=$%s,l=16$%s$%s", parts[1], parts[2], parts[3], parts[4])
+	return fmt.Sprintf("$pbkdf2-%s$i=%s,l=64$%s$%s", parts[1], parts[2], strings.TrimRight(parts[3], "="), strings.TrimRight(parts[4], "="))
 }
