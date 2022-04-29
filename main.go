@@ -570,6 +570,8 @@ function encodeDownlink(input) {
 %s`, asDP.PayloadDecoderScript, asDP.PayloadEncoderScript)
 		}
 
+		payloadCodec := strings.TrimPrefix(asDP.PayloadCodec, "CUSTOM_")
+
 		_, err = csDB.Exec(`
 			insert into device_profile (
 				id,
@@ -609,7 +611,7 @@ function encodeDownlink(input) {
 			nsDP.MACVersion,
 			nsDP.RegParamsRevision,
 			nsDP.ADRAlgorithmID,
-			asDP.PayloadCodec,
+			payloadCodec,
 			codecScript,
 			asDP.UplinkInterval/time.Second,
 			nsDP.SupportsJoin,
