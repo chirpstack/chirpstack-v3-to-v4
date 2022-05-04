@@ -1,0 +1,22 @@
+project_name: chirpstack-v3-to-v4
+
+builds:
+  -
+    main: main.go
+    binary: chirpstack-v3-to-v4
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm
+      - arm64
+    goarm:
+      - 7
+checksum:
+  name_template: 'checksums.txt'
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+release:
+  disable: true

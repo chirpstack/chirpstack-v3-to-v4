@@ -29,3 +29,17 @@ Usage example:
 
 **Warning:** only run this against an empty ChirpStack v4 database as this utilty
 will drop all tenants and users from the ChirpStack v4 database.
+
+## Building from source
+
+For creating a snapshot release:
+
+```
+make snapshot
+```
+
+For creating a release:
+
+```
+make release
+```
