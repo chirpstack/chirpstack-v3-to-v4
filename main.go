@@ -579,6 +579,7 @@ function encodeDownlink(input) {
 				created_at,
 				updated_at,
 				name,
+				description,
 				region,
 				mac_version,
 				reg_params_revision,
@@ -600,13 +601,15 @@ function encodeDownlink(input) {
 				abp_rx2_freq,
 				tags,
 				device_status_req_interval,
-				flush_queue_on_activate
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
+				flush_queue_on_activate,
+				measurements
+			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`,
 			nsDP.ID,
 			intToUUID(asDP.OrganizationID),
 			asDP.CreatedAt,
 			asDP.UpdatedAt,
 			asDP.Name,
+			"",
 			nsDP.RFRegion,
 			nsDP.MACVersion,
 			nsDP.RegParamsRevision,
@@ -629,6 +632,7 @@ function encodeDownlink(input) {
 			hstoreToJSON(asDP.Tags),
 			1,
 			true,
+			"{}",
 		)
 		if err != nil {
 			panic(err)
