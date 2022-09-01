@@ -1107,7 +1107,7 @@ func migrateDeviceMetrics(devEUI []byte) {
 		}
 
 		if err := csRedis.HSet(context.Background(), newKey, vals).Err(); err != nil {
-			panic(err)
+			log.Printf("Migrate device metrics error: %s", err)
 		}
 		if err := csRedis.PExpire(context.Background(), newKey, ttl[aggregation]).Err(); err != nil {
 			panic(err)
@@ -1146,7 +1146,7 @@ func migrateGatewayMetrics(gatewayID []byte) {
 		}
 
 		if err := csRedis.HSet(context.Background(), newKey, vals).Err(); err != nil {
-			panic(err)
+			log.Panicf("Migrate gateway metrics error: %s", err)
 		}
 		if err := csRedis.PExpire(context.Background(), newKey, ttl[aggregation]).Err(); err != nil {
 			panic(err)
