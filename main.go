@@ -1146,7 +1146,7 @@ func migrateGatewayMetrics(gatewayID []byte) {
 		}
 
 		if err := csRedis.HSet(context.Background(), newKey, vals).Err(); err != nil {
-			log.Panicf("Migrate gateway metrics error: %s", err)
+			log.Printf("Migrate gateway metrics error: %s", err)
 		}
 		if err := csRedis.PExpire(context.Background(), newKey, ttl[aggregation]).Err(); err != nil {
 			panic(err)
