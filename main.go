@@ -403,6 +403,8 @@ func migrateApplications() {
 	}
 }
 
+func migrateApplicationIntegrations()
+
 func migrateGateways() {
 	log.Println("Migrating gateways")
 
@@ -555,13 +557,13 @@ func migrateDeviceProfiles() {
 // v3 to v4 compatibility wrapper
 function decodeUplink(input) {
 	return {
-		object: Decode(input.fPort, input.bytes, input.variables)
+		data: Decode(input.fPort, input.bytes, input.variables)
 	};
 }
 
 function encodeDownlink(input) {
 	return {
-		data: Encode(input.fPort, input.data, input.variables)
+		bytes: Encode(input.fPort, input.data, input.variables)
 	};
 }
 
