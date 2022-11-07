@@ -998,8 +998,9 @@ function encodeDownlink(input) {
 				tags,
 				device_status_req_interval,
 				flush_queue_on_activate,
-				measurements
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`,
+				measurements,
+				auto_detect_measurements
+			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
 			nsDP.ID,
 			intToUUID(asDP.OrganizationID),
 			asDP.CreatedAt,
@@ -1029,6 +1030,7 @@ function encodeDownlink(input) {
 			1,
 			true,
 			"{}",
+			true,
 		)
 		if err != nil {
 			panic(err)
