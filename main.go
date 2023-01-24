@@ -847,7 +847,8 @@ func migrateGateways() {
 	for _, gw := range nsGateways {
 		asGateway := ASGateway{}
 		if err := asDB.Get(&asGateway, "select * from gateway where mac = $1", gw.GatewayID); err != nil {
-			panic(err)
+			log.Printf("Could not migrate gateway, GatewayID: %s, error: %s", gw.GatewayID, err)
+			continue
 		}
 
 		_, err = csDB.Exec(`
@@ -942,7 +943,8 @@ func migrateDeviceProfiles() {
 	for _, nsDP := range nsDevProfiles {
 		asDP := ASDeviceProfile{}
 		if err := asDB.Get(&asDP, "select * from device_profile where device_profile_id = $1", nsDP.ID); err != nil {
-			panic(err)
+			log.Printf("Could not migrate device-profile, ID: %s, error: %s", nsDP.ID, err)
+			continue
 		}
 
 		codecScript := ""
@@ -1091,7 +1093,8 @@ func migrateDevices() {
 		asDEV := ASDevice{}
 		err := asDB.Get(&asDEV, "select * from device where dev_eui = $1", dev.DevEUI)
 		if err != nil {
-			panic(err)
+			log.Printf("Could not migrate device, DevEUI: %s, error: %s", dev.DevEUI, err)
+			continue
 		}
 
 		_, err = csDB.Exec(`
@@ -1186,7 +1189,8 @@ func migrateDeviceKeys(devEUI []byte) {
 	deviceKeys := []DeviceKeys{}
 	err := asDB.Select(&deviceKeys, "select * from device_keys where dev_eui = $1", devEUI)
 	if err != nil {
-		panic(err)
+		log.Printf("Could not migrate device-keys, DevEUI: %s, error: %s", devEUI, err)
+		return
 	}
 
 	devNonces := []int64{}

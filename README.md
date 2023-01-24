@@ -30,6 +30,10 @@ Usage example:
 **Warning:** only run this against an empty ChirpStack v4 database as this utilty
 will drop all tenants and users from the ChirpStack v4 database.
 
+## Notes
+
+* This utilty does not support [environment variables](https://www.chirpstack.io/docs/chirpstack/configuration.html#environment-variables) in configuration files, like ChirpStack does.
+
 ## Building from source
 
 For creating a snapshot release:
