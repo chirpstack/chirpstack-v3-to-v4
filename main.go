@@ -989,7 +989,7 @@ function encodeDownlink(input) {
 				supports_class_b,
 				supports_class_c,
 				class_b_timeout,
-				class_b_ping_slot_period,
+				class_b_ping_slot_nb_k,
 				class_b_ping_slot_dr,
 				class_b_ping_slot_freq,
 				class_c_timeout,
@@ -1001,8 +1001,9 @@ function encodeDownlink(input) {
 				device_status_req_interval,
 				flush_queue_on_activate,
 				measurements,
-				auto_detect_measurements
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
+				auto_detect_measurements,
+				region_config_id
+			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)`,
 			nsDP.ID,
 			intToUUID(asDP.OrganizationID),
 			asDP.CreatedAt,
@@ -1033,6 +1034,7 @@ function encodeDownlink(input) {
 			true,
 			"{}",
 			true,
+			nil,
 		)
 		if err != nil {
 			panic(err)
