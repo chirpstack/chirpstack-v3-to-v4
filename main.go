@@ -299,8 +299,9 @@ func migrateOrganizations() {
 				can_have_gateways,
 				max_device_count,
 				max_gateway_count,
-				private_gateways
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				private_gateways_up,
+				private_gateways_down
+			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			on conflict do nothing`,
 			intToUUID(org.ID),
 			org.CreatedAt,
@@ -310,6 +311,7 @@ func migrateOrganizations() {
 			org.CanHaveGateways,
 			org.MaxDeviceCount,
 			org.MaxGatewayCount,
+			false,
 			false,
 		)
 		if err != nil {
