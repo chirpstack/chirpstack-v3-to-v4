@@ -32,7 +32,7 @@ will drop all tenants and users from the ChirpStack v4 database.
 
 ## Notes
 
-* This utilty is compatible with the ChirpStack v4.2.0 or later database schema.
+* This utilty is compatible with the ChirpStack v4.4.0 or later database schema.
 * This utilty does not support [environment variables](https://www.chirpstack.io/docs/chirpstack/configuration.html#environment-variables) in configuration files, like ChirpStack does.
 
 ## Building from source
