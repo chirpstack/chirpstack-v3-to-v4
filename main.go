@@ -1142,6 +1142,11 @@ func migrateDevices() {
 	}
 
 	for _, dev := range devices {
+		// In v3 this column can be an empty string. In v4 the default value is "A".
+		if dev.Mode == "" {
+			dev.Mode = "A"
+		}
+
 		// Device
 		asDEV := ASDevice{}
 		err := asDB.Get(&asDEV, "select * from device where dev_eui = $1", dev.DevEUI)
