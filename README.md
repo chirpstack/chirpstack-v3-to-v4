@@ -1,6 +1,6 @@
 # ChirpStack v3 to v4 data-migration
 
-This utilty migrates data from a single ChirpStack Application Server instance
+This utility migrates data from a single ChirpStack Application Server instance
 and one or multiple ChirpStack Network Server instances (in case of multiple-regions)
 into the new ChirpStack v4 data-structure.
 
@@ -27,13 +27,13 @@ Usage example:
 	--ns-config-file /etc/chirpstack-network-server/chirpstack-network-server.toml
 ```
 
-**Warning:** only run this against an empty ChirpStack v4 database as this utilty
+**Warning:** only run this against an empty ChirpStack v4 database as this utility
 will drop all tenants and users from the ChirpStack v4 database.
 
 ## Notes
 
-* This utilty is compatible with the ChirpStack v4.4.0 or later database schema.
-* This utilty does not support [environment variables](https://www.chirpstack.io/docs/chirpstack/configuration.html#environment-variables) in configuration files, like ChirpStack does.
+* This utility is compatible with the ChirpStack v4.4.0 or later database schema.
+* This utility does not support [environment variables](https://www.chirpstack.io/docs/chirpstack/configuration.html#environment-variables) in configuration files, like ChirpStack does.
 
 ## Building from source
 
