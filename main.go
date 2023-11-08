@@ -32,6 +32,13 @@ var asConfigFile string
 var csConfigFile string
 var nsConfigFiles []string
 var csSessionTTL int
+var dropTenantAndUsers bool
+var migrateUsers bool
+var migrateTenants bool
+var migrateApplications bool
+var migrateGateways bool
+var migrateDeviceProfiles bool
+var migrateDevices bool
 
 var (
 	nsDB     *sqlx.DB
@@ -73,6 +80,13 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&asConfigFile, "as-config-file", "", "", "Path to chirpstack-application-server.toml configuration file")
 	rootCmd.PersistentFlags().StringArrayVarP(&nsConfigFiles, "ns-config-file", "", []string{}, "Path to chirpstack-network-server.toml configuration file (can be repeated)")
 	rootCmd.PersistentFlags().IntVarP(&csSessionTTL, "device-session-ttl-days", "", 31, "Device-session TTL in days")
+	rootCmd.PersistentFlags().BoolVarP(&dropTenantAndUsers, "drop-tenants-and-users", "", false, "Drop tenants and users before migration")
+	rootCmd.PersistentFlags().BoolVarP(&migrateUsers, "migrate-users", "", true, "Migrate users")
+	rootCmd.PersistentFlags().BoolVarP(&migrateTenants, "migrate-tenants", "", true, "Migrate tenants")
+	rootCmd.PersistentFlags().BoolVarP(&migrateApplications, "migrate-applications", "", true, "Migrate applications")
+	rootCmd.PersistentFlags().BoolVarP(&migrateGateways, "migrate-gateways", "", true, "Migrate gateways")
+	rootCmd.PersistentFlags().BoolVarP(&migrateDeviceProfiles, "migrate-device-profiles", "", true, "Migrate device profiles")
+	rootCmd.PersistentFlags().BoolVarP(&migrateDevices, "migrate-devices", "", true, "Migrate devices")
 }
 
 func main() {
@@ -96,12 +110,24 @@ func run(cmd *cobra.Command, args []string) error {
 	asDB = getPostgresClient(asConfig)
 	asPrefix = asConfig.Redis.KeyPrefix
 
-	deleteUsersAndTenants()
-	migrateUsers()
-	migrateOrganizations()
-	migrateOrganizationUsers()
-	migrateApplications()
-	migrateApplicationIntegrations()
+	if dropTenantAndUsers {
+		deleteUsersAndTenants()
+	}
+
+	if migrateUsers {
+		migrateUsersFn()
+	}
+
+	if migrateTenants {
+		migrateOrganizationsFn()
+		migrateOrganizationUsersFn()
+
+	}
+
+	if migrateApplications {
+		migrateApplicationsFn()
+		migrateApplicationIntegrationsFn()
+	}
 
 	for _, nsConfigFile := range nsConfigFiles {
 		log.Printf("Reading NS configuration file: %s", nsConfigFile)
@@ -110,9 +136,17 @@ func run(cmd *cobra.Command, args []string) error {
 		nsDB = getPostgresClient(nsConfig)
 		nsPrefix = nsConfig.Redis.KeyPrefix
 
-		migrateGateways()
-		migrateDeviceProfiles()
-		migrateDevices()
+		if migrateGateways {
+			migrateGatewaysFn()
+		}
+
+		if migrateDeviceProfiles {
+			migrateDeviceProfilesFn()
+		}
+
+		if migrateDevices {
+			migrateDevicesFn()
+		}
 	}
 
 	return nil
@@ -216,7 +250,7 @@ func deleteUsersAndTenants() {
 	}
 }
 
-func migrateUsers() {
+func migrateUsersFn() {
 	log.Println("Migrating users")
 	type User struct {
 		ID            int64     `db:"id"`
@@ -270,7 +304,7 @@ func migrateUsers() {
 	}
 }
 
-func migrateOrganizations() {
+func migrateOrganizationsFn() {
 	log.Println("Migrating organizations")
 	type Organization struct {
 		ID              int64     `db:"id"`
@@ -320,7 +354,7 @@ func migrateOrganizations() {
 	}
 }
 
-func migrateOrganizationUsers() {
+func migrateOrganizationUsersFn() {
 	log.Println("Migrating organization users")
 	type OrganizationUser struct {
 		ID             int64     `db:"id"`
@@ -366,7 +400,7 @@ func migrateOrganizationUsers() {
 
 }
 
-func migrateApplications() {
+func migrateApplicationsFn() {
 	log.Println("Migrating applications")
 	type Application struct {
 		ID             int64  `db:"id"`
@@ -406,7 +440,7 @@ func migrateApplications() {
 	}
 }
 
-func migrateApplicationIntegrations() {
+func migrateApplicationIntegrationsFn() {
 	log.Println("Migrating application integrations")
 
 	type Intergration struct {
@@ -801,7 +835,7 @@ func getIntegrationConfiguration(kind string, raw json.RawMessage) json.RawMessa
 	return b
 }
 
-func migrateGateways() {
+func migrateGatewaysFn() {
 	log.Println("Migrating gateways")
 
 	type NSGateway struct {
@@ -893,7 +927,7 @@ func migrateGateways() {
 	}
 }
 
-func migrateDeviceProfiles() {
+func migrateDeviceProfilesFn() {
 	log.Println("Migrating device-profiles")
 
 	type NSDeviceProfile struct {
@@ -1094,7 +1128,7 @@ function encodeDownlink(input) {
 
 }
 
-func migrateDevices() {
+func migrateDevicesFn() {
 	log.Println("Migrating devices")
 
 	type NSDevice struct {

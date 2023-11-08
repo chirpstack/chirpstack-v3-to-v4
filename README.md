@@ -14,7 +14,14 @@ Flags:
       --as-config-file string         Path to chirpstack-application-server.toml configuration file
       --cs-config-file string         Path to chirpstack.toml configuration file
       --device-session-ttl-days int   Device-session TTL in days (default 31)
+      --drop-tenants-and-users        Drop tenants and users before migration
   -h, --help                          help for chirpstack-v3-to-v4
+      --migrate-applications          Migrate applications (default true)
+      --migrate-device-profiles       Migrate device profiles (default true)
+      --migrate-devices               Migrate devices (default true)
+      --migrate-gateways              Migrate gateways (default true)
+      --migrate-tenants               Migrate tenants (default true)
+      --migrate-users                 Migrate users (default true)
       --ns-config-file stringArray    Path to chirpstack-network-server.toml configuration file (can be repeated)
 ```
 
@@ -27,8 +34,9 @@ Usage example:
 	--ns-config-file /etc/chirpstack-network-server/chirpstack-network-server.toml
 ```
 
-**Warning:** only run this against an empty ChirpStack v4 database as this utility
-will drop all tenants and users from the ChirpStack v4 database.
+**Warning:** Always make a backup before starting a migration. If the
+`--drop-tenants-and-users` argument is used, then all data in the target
+database will be removed!
 
 ## Notes
 
