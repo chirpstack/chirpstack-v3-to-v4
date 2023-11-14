@@ -17,8 +17,10 @@ Flags:
       --drop-tenants-and-users        Drop tenants and users before migration
   -h, --help                          help for chirpstack-v3-to-v4
       --migrate-applications          Migrate applications (default true)
+      --migrate-device-metrics        Migrate device metrics (default true)
       --migrate-device-profiles       Migrate device profiles (default true)
       --migrate-devices               Migrate devices (default true)
+      --migrate-gateway-metrics       Migrate gateway metrics (default true)
       --migrate-gateways              Migrate gateways (default true)
       --migrate-tenants               Migrate tenants (default true)
       --migrate-users                 Migrate users (default true)

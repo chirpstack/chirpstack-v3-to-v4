@@ -39,6 +39,7 @@ var migrateGateways bool
 var migrateDeviceProfiles bool
 var migrateDevices bool
 var migrateGatewayMetrics bool
+var migrateDeviceMetrics bool
 
 var (
 	nsDB     *sqlx.DB
@@ -88,6 +89,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&migrateDeviceProfiles, "migrate-device-profiles", "", true, "Migrate device profiles")
 	rootCmd.PersistentFlags().BoolVarP(&migrateDevices, "migrate-devices", "", true, "Migrate devices")
 	rootCmd.PersistentFlags().BoolVarP(&migrateGatewayMetrics, "migrate-gateway-metrics", "", true, "Migrate gateway metrics")
+	rootCmd.PersistentFlags().BoolVarP(&migrateDeviceMetrics, "migrate-device-metrics", "", true, "Migrate device metrics")
 }
 
 func main() {
@@ -1479,9 +1481,11 @@ func migrateDevicesFn() {
 	// We have to migrate the Redis data per DevEUI because the data might be
 	// sharded and different DevEUIs might map to different hash slots.
 
-	log.Println("Migrating device metrics")
-	for devEUI := range appSKeys {
-		migrateDeviceMetricsFn(devEUI[:])
+	if migrateDeviceMetrics {
+		log.Println("Migrating device metrics")
+		for devEUI := range appSKeys {
+			migrateDeviceMetricsFn(devEUI[:])
+		}
 	}
 
 	log.Println("Migrating device-sessions")
