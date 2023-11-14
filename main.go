@@ -29,32 +29,38 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var asConfigFile string
-var csConfigFile string
-var nsConfigFiles []string
-var devEUIListFile string
-var csSessionTTL int
-var dropTenantAndUsers bool
-var migrateUsers bool
-var migrateTenants bool
-var migrateApplications bool
-var migrateGateways bool
-var migrateDeviceProfiles bool
-var migrateDevices bool
-var migrateGatewayMetrics bool
-var migrateDeviceMetrics bool
-
+// CLI parameters
 var (
-	nsDB        *sqlx.DB
-	asDB        *sqlx.DB
-	csDB        *sqlx.DB
-	nsRedis     redis.UniversalClient
-	asRedis     redis.UniversalClient
-	csRedis     redis.UniversalClient
-	nsPrefix    string
-	asPrefix    string
-	csPrefix    string
-	devEUIsList [][]byte
+	asConfigFile            string
+	csConfigFile            string
+	nsConfigFiles           []string
+	deviceProfileIDListFile string
+	devEUIListFile          string
+	csSessionTTL            int
+	dropTenantAndUsers      bool
+	migrateUsers            bool
+	migrateTenants          bool
+	migrateApplications     bool
+	migrateGateways         bool
+	migrateDeviceProfiles   bool
+	migrateDevices          bool
+	migrateGatewayMetrics   bool
+	migrateDeviceMetrics    bool
+)
+
+// Internal state
+var (
+	nsDB                *sqlx.DB
+	asDB                *sqlx.DB
+	csDB                *sqlx.DB
+	nsRedis             redis.UniversalClient
+	asRedis             redis.UniversalClient
+	csRedis             redis.UniversalClient
+	nsPrefix            string
+	asPrefix            string
+	csPrefix            string
+	devEUIsList         [][]byte
+	deviceProfileIDList []uuid.UUID
 )
 
 var rootCmd = &cobra.Command{
@@ -85,6 +91,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&asConfigFile, "as-config-file", "", "", "Path to chirpstack-application-server.toml configuration file")
 	rootCmd.PersistentFlags().StringArrayVarP(&nsConfigFiles, "ns-config-file", "", []string{}, "Path to chirpstack-network-server.toml configuration file (can be repeated)")
 	rootCmd.PersistentFlags().StringVarP(&devEUIListFile, "deveui-list-file", "", "", "Path to file containing DevEUIs to migrate (one DevEUI per line)")
+	rootCmd.PersistentFlags().StringVarP(&deviceProfileIDListFile, "device-profile-id-list-file", "", "", "Path to file containing list of Device Profile IDs to migrate (one per line)")
 	rootCmd.PersistentFlags().IntVarP(&csSessionTTL, "device-session-ttl-days", "", 31, "Device-session TTL in days")
 	rootCmd.PersistentFlags().BoolVarP(&dropTenantAndUsers, "drop-tenants-and-users", "", false, "Drop tenants and users before migration")
 	rootCmd.PersistentFlags().BoolVarP(&migrateUsers, "migrate-users", "", true, "Migrate users")
@@ -148,6 +155,35 @@ func run(cmd *cobra.Command, args []string) error {
 			}
 
 			devEUIsList = append(devEUIsList, b)
+		}
+	}
+
+	if deviceProfileIDListFile != "" {
+		log.Printf("Reading Device Profile ID list file: %s", deviceProfileIDListFile)
+		file, err := os.Open(deviceProfileIDListFile)
+		if err != nil {
+			log.Fatalf("Open Device Profile ID list file error: %s", err)
+		}
+		defer file.Close()
+
+		reader := bufio.NewReader(file)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				break
+			}
+
+			line = strings.TrimRight(line, "\n")
+			if len(line) == 0 {
+				continue
+			}
+
+			var id uuid.UUID
+			if err := id.UnmarshalText([]byte(line)); err != nil {
+				log.Fatalf("Invalid Device Profile ID: '%s'", line)
+			}
+
+			deviceProfileIDList = append(deviceProfileIDList, id)
 		}
 	}
 
@@ -1165,9 +1201,16 @@ func migrateDeviceProfilesFn() {
 	nsDevProfiles := []NSDeviceProfile{}
 	asDevProfiles := []ASDeviceProfile{}
 
-	err := nsDB.Select(&nsDevProfiles, "select * from device_profile")
-	if err != nil {
-		log.Fatal("Select device profiles error", err)
+	if len(deviceProfileIDList) == 0 {
+		err := nsDB.Select(&nsDevProfiles, "select * from device_profile")
+		if err != nil {
+			log.Fatal("Select device profiles error", err)
+		}
+	} else {
+		err := nsDB.Select(&nsDevProfiles, "select * from device_profile where device_profile_id = any($1)", pq.Array(deviceProfileIDList))
+		if err != nil {
+			log.Fatal("Select device profiles error", err)
+		}
 	}
 
 	var devProfileIDs []uuid.UUID
@@ -1175,7 +1218,7 @@ func migrateDeviceProfilesFn() {
 		devProfileIDs = append(devProfileIDs, nsDevProfiles[i].ID)
 	}
 
-	err = asDB.Select(&asDevProfiles, "select * from device_profile where device_profile_id = any($1)", pq.Array((devProfileIDs)))
+	err := asDB.Select(&asDevProfiles, "select * from device_profile where device_profile_id = any($1)", pq.Array((devProfileIDs)))
 	if err != nil {
 		log.Fatal("Select device profiles error", err)
 	}

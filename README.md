@@ -11,20 +11,22 @@ Usage:
   chirpstack-v3-to-v4 [flags]
 
 Flags:
-      --as-config-file string         Path to chirpstack-application-server.toml configuration file
-      --cs-config-file string         Path to chirpstack.toml configuration file
-      --device-session-ttl-days int   Device-session TTL in days (default 31)
-      --drop-tenants-and-users        Drop tenants and users before migration
-  -h, --help                          help for chirpstack-v3-to-v4
-      --migrate-applications          Migrate applications (default true)
-      --migrate-device-metrics        Migrate device metrics (default true)
-      --migrate-device-profiles       Migrate device profiles (default true)
-      --migrate-devices               Migrate devices (default true)
-      --migrate-gateway-metrics       Migrate gateway metrics (default true)
-      --migrate-gateways              Migrate gateways (default true)
-      --migrate-tenants               Migrate tenants (default true)
-      --migrate-users                 Migrate users (default true)
-      --ns-config-file stringArray    Path to chirpstack-network-server.toml configuration file (can be repeated)
+      --as-config-file string                Path to chirpstack-application-server.toml configuration file
+      --cs-config-file string                Path to chirpstack.toml configuration file
+      --deveui-list-file string              Path to file containing DevEUIs to migrate (one DevEUI per line)
+      --device-profile-id-list-file string   Path to file containing list of Device Profile IDs to migrate (one per line)
+      --device-session-ttl-days int          Device-session TTL in days (default 31)
+      --drop-tenants-and-users               Drop tenants and users before migration
+  -h, --help                                 help for chirpstack-v3-to-v4
+      --migrate-applications                 Migrate applications (default true)
+      --migrate-device-metrics               Migrate device metrics (default true)
+      --migrate-device-profiles              Migrate device profiles (default true)
+      --migrate-devices                      Migrate devices (default true)
+      --migrate-gateway-metrics              Migrate gateway metrics (default true)
+      --migrate-gateways                     Migrate gateways (default true)
+      --migrate-tenants                      Migrate tenants (default true)
+      --migrate-users                        Migrate users (default true)
+      --ns-config-file stringArray           Path to chirpstack-network-server.toml configuration file (can be repeated)
 ```
 
 Usage example:
