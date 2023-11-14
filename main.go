@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,7 @@ import (
 var asConfigFile string
 var csConfigFile string
 var nsConfigFiles []string
+var devEUIListFile string
 var csSessionTTL int
 var dropTenantAndUsers bool
 var migrateUsers bool
@@ -42,15 +45,16 @@ var migrateGatewayMetrics bool
 var migrateDeviceMetrics bool
 
 var (
-	nsDB     *sqlx.DB
-	asDB     *sqlx.DB
-	csDB     *sqlx.DB
-	nsRedis  redis.UniversalClient
-	asRedis  redis.UniversalClient
-	csRedis  redis.UniversalClient
-	nsPrefix string
-	asPrefix string
-	csPrefix string
+	nsDB        *sqlx.DB
+	asDB        *sqlx.DB
+	csDB        *sqlx.DB
+	nsRedis     redis.UniversalClient
+	asRedis     redis.UniversalClient
+	csRedis     redis.UniversalClient
+	nsPrefix    string
+	asPrefix    string
+	csPrefix    string
+	devEUIsList [][]byte
 )
 
 var rootCmd = &cobra.Command{
@@ -80,6 +84,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&csConfigFile, "cs-config-file", "", "", "Path to chirpstack.toml configuration file")
 	rootCmd.PersistentFlags().StringVarP(&asConfigFile, "as-config-file", "", "", "Path to chirpstack-application-server.toml configuration file")
 	rootCmd.PersistentFlags().StringArrayVarP(&nsConfigFiles, "ns-config-file", "", []string{}, "Path to chirpstack-network-server.toml configuration file (can be repeated)")
+	rootCmd.PersistentFlags().StringVarP(&devEUIListFile, "deveui-list-file", "", "", "Path to file containing DevEUIs to migrate (one DevEUI per line)")
 	rootCmd.PersistentFlags().IntVarP(&csSessionTTL, "device-session-ttl-days", "", 31, "Device-session TTL in days")
 	rootCmd.PersistentFlags().BoolVarP(&dropTenantAndUsers, "drop-tenants-and-users", "", false, "Drop tenants and users before migration")
 	rootCmd.PersistentFlags().BoolVarP(&migrateUsers, "migrate-users", "", true, "Migrate users")
@@ -112,6 +117,39 @@ func run(cmd *cobra.Command, args []string) error {
 	asRedis = getRedisClient(asConfig)
 	asDB = getPostgresClient(asConfig)
 	asPrefix = asConfig.Redis.KeyPrefix
+
+	if devEUIListFile != "" {
+		log.Printf("Reading DevEUI list file: %s", devEUIListFile)
+		file, err := os.Open(devEUIListFile)
+		if err != nil {
+			log.Fatalf("Open DevEUI list file error: %s", err)
+		}
+		defer file.Close()
+
+		reader := bufio.NewReader(file)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				break
+			}
+
+			line = strings.TrimRight(line, "\n")
+			if len(line) == 0 {
+				continue
+			}
+
+			if len(line) != 16 {
+				log.Fatalf("Invalid DevEUI: '%s'", line)
+			}
+
+			b, err := hex.DecodeString(line)
+			if err != nil {
+				log.Fatalf("Decode line error, line: '%s', error: %s", line, err)
+			}
+
+			devEUIsList = append(devEUIsList, b)
+		}
+	}
 
 	log.Println("Start migration")
 
@@ -1359,9 +1397,16 @@ func migrateDevicesFn() {
 	appSKeys := map[lorawan.EUI64]lorawan.AES128Key{}
 	nsDevices := []NSDevice{}
 	asDevices := []ASDevice{}
-	err := nsDB.Select(&nsDevices, "select * from device")
-	if err != nil {
-		log.Fatal("Select devices error", err)
+	if len(devEUIsList) == 0 {
+		err := nsDB.Select(&nsDevices, "select * from device")
+		if err != nil {
+			log.Fatal("Select devices error", err)
+		}
+	} else {
+		err := nsDB.Select(&nsDevices, "select * from device where dev_eui = any($1)", pq.ByteaArray(devEUIsList))
+		if err != nil {
+			log.Fatal("Select devices error", err)
+		}
 	}
 
 	var deviceIDs [][]byte
@@ -1369,7 +1414,7 @@ func migrateDevicesFn() {
 		deviceIDs = append(deviceIDs, nsDevices[i].DevEUI[:])
 	}
 
-	err = asDB.Select(&asDevices, "select * from device where dev_eui = any($1)", pq.ByteaArray(deviceIDs))
+	err := asDB.Select(&asDevices, "select * from device where dev_eui = any($1)", pq.ByteaArray(deviceIDs))
 	if err != nil {
 		log.Fatal("Select devices error", err)
 	}
