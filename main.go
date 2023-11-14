@@ -21,7 +21,6 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
-	_ "github.com/lib/pq"
 	"github.com/lib/pq/hstore"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -39,6 +38,7 @@ var migrateApplications bool
 var migrateGateways bool
 var migrateDeviceProfiles bool
 var migrateDevices bool
+var migrateGatewayMetrics bool
 
 var (
 	nsDB     *sqlx.DB
@@ -87,11 +87,12 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&migrateGateways, "migrate-gateways", "", true, "Migrate gateways")
 	rootCmd.PersistentFlags().BoolVarP(&migrateDeviceProfiles, "migrate-device-profiles", "", true, "Migrate device profiles")
 	rootCmd.PersistentFlags().BoolVarP(&migrateDevices, "migrate-devices", "", true, "Migrate devices")
+	rootCmd.PersistentFlags().BoolVarP(&migrateGatewayMetrics, "migrate-gateway-metrics", "", true, "Migrate gateway metrics")
 }
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 }
 
@@ -109,6 +110,8 @@ func run(cmd *cobra.Command, args []string) error {
 	asRedis = getRedisClient(asConfig)
 	asDB = getPostgresClient(asConfig)
 	asPrefix = asConfig.Redis.KeyPrefix
+
+	log.Println("Start migration")
 
 	if dropTenantAndUsers {
 		deleteUsersAndTenants()
@@ -149,26 +152,28 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	log.Println("Done :)")
+
 	return nil
 }
 
 func getConfig(f string, parseRedis bool) Config {
 	b, err := ioutil.ReadFile(f)
 	if err != nil {
-		panic(err)
+		log.Fatal("Read configuration error", err)
 	}
 	if err := viper.ReadConfig(bytes.NewBuffer(b)); err != nil {
-		panic(err)
+		log.Fatal("Read configuration error", err)
 	}
 	config := Config{}
 	if err := viper.Unmarshal(&config); err != nil {
-		panic(err)
+		log.Fatal("Read configuration error", err)
 	}
 
 	if config.Redis.URL != "" {
 		opt, err := redis.ParseURL(config.Redis.URL)
 		if err != nil {
-			panic(err)
+			log.Fatal("Parse Redis URL error", err)
 		}
 		config.Redis.Servers = append(config.Redis.Servers, opt.Addr)
 		config.Redis.Database = opt.DB
@@ -179,7 +184,7 @@ func getConfig(f string, parseRedis bool) Config {
 		for i, redisURL := range config.Redis.Servers {
 			opt, err := redis.ParseURL(redisURL)
 			if err != nil {
-				panic(err)
+				log.Fatal("Parse Redis URL error", err)
 			}
 
 			config.Redis.Servers[i] = opt.Addr
@@ -233,25 +238,37 @@ func getRedisClient(c Config) redis.UniversalClient {
 func getPostgresClient(c Config) *sqlx.DB {
 	d, err := sqlx.Open("postgres", c.PostgreSQL.DSN)
 	if err != nil {
-		panic(err)
+		log.Fatal("Open PostgreSQL connection error", err)
 	}
 	return d
 }
 
 func deleteUsersAndTenants() {
 	log.Println("Deleting users and tenants from target database")
-	_, err := csDB.Exec("delete from tenant")
+
+	tx, err := csDB.Beginx()
 	if err != nil {
-		panic(err)
+		log.Fatal("Start transaction error", err)
 	}
-	_, err = csDB.Exec(`delete from "user"`)
+
+	_, err = tx.Exec("delete from tenant")
 	if err != nil {
-		panic(err)
+		log.Fatal("Delete tenants error", err)
+	}
+	_, err = tx.Exec(`delete from "user"`)
+	if err != nil {
+		log.Fatal("Delete users error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
 	}
 }
 
 func migrateUsersFn() {
 	log.Println("Migrating users")
+
 	type User struct {
 		ID            int64     `db:"id"`
 		IsAdmin       bool      `db:"is_admin"`
@@ -269,24 +286,31 @@ func migrateUsersFn() {
 
 	users := []User{}
 	if err := asDB.Select(&users, `select * from "user"`); err != nil {
-		panic(err)
+		log.Fatal("Select users error", err)
+	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("user",
+		"id",
+		"external_id",
+		"created_at",
+		"updated_at",
+		"is_admin",
+		"is_active",
+		"email",
+		"email_verified",
+		"password_hash",
+		"note"))
+	if err != nil {
+		log.Fatal("Prepare user statement error", err)
 	}
 
 	for _, user := range users {
-		_, err := csDB.Exec(`
-			insert into "user" (
-				id,
-				external_id,
-				created_at,
-				updated_at,
-				is_admin,
-				is_active,
-				email,
-				email_verified,
-				password_hash,
-				note
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			on conflict do nothing`,
+		_, err = stmt.Exec(
 			intToUUID(user.ID),
 			user.ExternalID,
 			user.CreatedAt,
@@ -299,8 +323,18 @@ func migrateUsersFn() {
 			user.Note,
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Exec user statement error", err)
 		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec user statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
 	}
 }
 
@@ -319,24 +353,33 @@ func migrateOrganizationsFn() {
 
 	orgs := []Organization{}
 	if err := asDB.Select(&orgs, "select * from organization"); err != nil {
-		panic(err)
+		log.Fatal("Select organizations error", err)
+	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("tenant",
+		"id",
+		"created_at",
+		"updated_at",
+		"name",
+		"description",
+		"can_have_gateways",
+		"max_device_count",
+		"max_gateway_count",
+		"private_gateways_up",
+		"private_gateways_down",
+		"tags",
+	))
+	if err != nil {
+		log.Fatal("Prepare tenant statement error", err)
 	}
 
 	for _, org := range orgs {
-		_, err := csDB.Exec(`
-			insert into tenant (
-				id,
-				created_at,
-				updated_at,
-				name,
-				description,
-				can_have_gateways,
-				max_device_count,
-				max_gateway_count,
-				private_gateways_up,
-				private_gateways_down
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			on conflict do nothing`,
+		_, err = stmt.Exec(
 			intToUUID(org.ID),
 			org.CreatedAt,
 			org.UpdatedAt,
@@ -347,10 +390,21 @@ func migrateOrganizationsFn() {
 			org.MaxGatewayCount,
 			false,
 			false,
+			"{}",
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Exec tenant statement error", err)
 		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec tenant statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
 	}
 }
 
@@ -370,21 +424,29 @@ func migrateOrganizationUsersFn() {
 
 	orgUsers := []OrganizationUser{}
 	if err := asDB.Select(&orgUsers, "select * from organization_user"); err != nil {
+		log.Fatal("Select organization users error", err)
 		panic(err)
 	}
 
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("tenant_user",
+		"tenant_id",
+		"user_id",
+		"created_at",
+		"updated_at",
+		"is_admin",
+		"is_device_admin",
+		"is_gateway_admin"))
+	if err != nil {
+		log.Fatal("Prepare tenant users statement error", err)
+	}
+
 	for _, orgUser := range orgUsers {
-		_, err := csDB.Exec(`
-			insert into tenant_user (
-				tenant_id,
-				user_id,
-				created_at,
-				updated_at,
-				is_admin,
-				is_device_admin,
-				is_gateway_admin
-			) values ($1, $2, $3, $4, $5, $6, $7)
-			on conflict do nothing`,
+		_, err = stmt.Exec(
 			intToUUID(orgUser.OrganizationID),
 			intToUUID(orgUser.UserID),
 			orgUser.CreatedAt,
@@ -394,10 +456,19 @@ func migrateOrganizationUsersFn() {
 			orgUser.IsGatewayAdmin,
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Exec tenant users statement error", err)
 		}
 	}
 
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec tenant users statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
+	}
 }
 
 func migrateApplicationsFn() {
@@ -412,20 +483,29 @@ func migrateApplicationsFn() {
 
 	apps := []Application{}
 	if err := asDB.Select(&apps, "select id, name, description, organization_id, mqtt_tls_cert from application"); err != nil {
-		panic(err)
+		log.Fatal("Select applications error", err)
 	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("application",
+		"id",
+		"tenant_id",
+		"created_at",
+		"updated_at",
+		"name",
+		"description",
+		"mqtt_tls_cert",
+		"tags"))
+	if err != nil {
+		log.Fatal("Prepare application statement error", err)
+	}
+
 	for _, app := range apps {
-		_, err := csDB.Exec(`
-			insert into application (
-				id,
-				tenant_id,
-				created_at,
-				updated_at,
-				name,
-				description,
-				mqtt_tls_cert
-			) values ($1, $2, $3, $4, $5, $6, $7)
-			on conflict do nothing`,
+		_, err := stmt.Exec(
 			intToUUID(app.ID),
 			intToUUID(app.OrganizationID),
 			time.Now(),
@@ -433,10 +513,21 @@ func migrateApplicationsFn() {
 			app.Name,
 			app.Description,
 			app.MQTTTLSCert,
+			"{}",
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Exec application statement error", err)
 		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec application statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
 	}
 }
 
@@ -454,29 +545,43 @@ func migrateApplicationIntegrationsFn() {
 
 	ints := []Intergration{}
 	if err := asDB.Select(&ints, "select id, created_at, updated_at, application_id, kind, settings from integration"); err != nil {
-		panic(err)
+		log.Fatal("Select application integrations error", err)
 	}
 
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("application_integration",
+		"application_id",
+		"kind",
+		"created_at",
+		"updated_at",
+		"configuration",
+	))
+
 	for _, i := range ints {
-		_, err := csDB.Exec(`
-			insert into application_integration (
-				application_id,
-				kind,
-				created_at,
-				updated_at,
-				configuration
-			) values ($1, $2, $3, $4, $5)`,
-			intToUUID(i.ApplicationID),
+		_, err := stmt.Exec(
 			getIntegrationKind(i.Kind),
 			i.CreatedAt,
 			i.UpdatedAt,
 			getIntegrationConfiguration(i.Kind, i.Settings),
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Exec application integrations statement error", err)
 		}
 	}
 
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec application integrations statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
+	}
 }
 
 func getIntegrationKind(k string) string {
@@ -875,55 +980,102 @@ func migrateGatewaysFn() {
 	}
 
 	nsGateways := []NSGateway{}
+	asGateways := []ASGateway{}
+
 	err := nsDB.Select(&nsGateways, "select * from gateway")
 	if err != nil {
-		panic(err)
+		log.Fatal("Select gateways error", err)
 	}
 
-	for _, gw := range nsGateways {
-		asGateway := ASGateway{}
-		if err := asDB.Get(&asGateway, "select * from gateway where mac = $1", gw.GatewayID); err != nil {
-			log.Printf("Could not migrate gateway, GatewayID: %s, error: %s", gw.GatewayID, err)
-			continue
+	var gatewayIDs [][]byte
+	for i := range nsGateways {
+		gatewayIDs = append(gatewayIDs, nsGateways[i].GatewayID[:])
+	}
+
+	err = asDB.Select(&asGateways, "select * from gateway where mac = any($1)", pq.ByteaArray(gatewayIDs))
+	if err != nil {
+		log.Fatal("Select gateways error", err)
+	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("gateway",
+		"gateway_id",
+		"tenant_id",
+		"created_at",
+		"updated_at",
+		"last_seen_at",
+		"name",
+		"description",
+		"latitude",
+		"longitude",
+		"altitude",
+		"stats_interval_secs",
+		"tls_certificate",
+		"tags",
+		"properties",
+	))
+	if err != nil {
+		log.Fatal("Prepare gateway statement error", err)
+	}
+
+	for _, nsGw := range nsGateways {
+		found := false
+
+		for _, asGw := range asGateways {
+			if !bytes.Equal(nsGw.GatewayID, asGw.MAC) {
+				continue
+			}
+
+			found = true
+
+			_, err = stmt.Exec(
+				nsGw.GatewayID,
+				intToUUID(asGw.OrganizationID),
+				asGw.CreatedAt,
+				asGw.UpdatedAt,
+				asGw.LastSeenAt,
+				asGw.Name,
+				asGw.Description,
+				asGw.Latitude,
+				asGw.Longitude,
+				asGw.Altitude,
+				30,
+				nsGw.TLSCert,
+				hstoreToJSON(asGw.Tags),
+				hstoreToJSON(asGw.Metadata),
+			)
+			if err != nil {
+				log.Fatal("Exec gateway statement error", err)
+			}
 		}
 
-		_, err = csDB.Exec(`
-			insert into gateway (
-				gateway_id,
-				tenant_id,
-				created_at,
-				updated_at,
-				last_seen_at,
-				name,
-				description,
-				latitude,
-				longitude,
-				altitude,
-				stats_interval_secs,
-				tls_certificate,
-				tags,
-				properties
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-			gw.GatewayID,
-			intToUUID(asGateway.OrganizationID),
-			asGateway.CreatedAt,
-			asGateway.UpdatedAt,
-			asGateway.LastSeenAt,
-			asGateway.Name,
-			asGateway.Description,
-			asGateway.Latitude,
-			asGateway.Longitude,
-			asGateway.Altitude,
-			30,
-			gw.TLSCert,
-			hstoreToJSON(asGateway.Tags),
-			hstoreToJSON(asGateway.Metadata),
-		)
-		if err != nil {
-			panic(err)
+		if !found {
+			log.Printf("Gateway not found in AS database, gateway_id: %s", nsGw.GatewayID)
 		}
+	}
 
-		migrateGatewayMetrics(gw.GatewayID)
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec gateway statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
+	}
+
+	if migrateGatewayMetrics {
+		log.Println("Migrating gateway metrics")
+
+		// We have to migrate the Redis data per GatewayID because the data might be
+		// sharded and different GatewayIDs might map to different hash slots.
+		for _, gatewayID := range gatewayIDs {
+			migrateGatewayMetricsFn(gatewayID)
+		}
 	}
 }
 
@@ -971,21 +1123,100 @@ func migrateDeviceProfilesFn() {
 	}
 
 	nsDevProfiles := []NSDeviceProfile{}
+	asDevProfiles := []ASDeviceProfile{}
+
 	err := nsDB.Select(&nsDevProfiles, "select * from device_profile")
 	if err != nil {
-		panic(err)
+		log.Fatal("Select device profiles error", err)
+	}
+
+	var devProfileIDs []uuid.UUID
+	for i := range nsDevProfiles {
+		devProfileIDs = append(devProfileIDs, nsDevProfiles[i].ID)
+	}
+
+	err = asDB.Select(&asDevProfiles, "select * from device_profile where device_profile_id = any($1)", pq.Array((devProfileIDs)))
+	if err != nil {
+		log.Fatal("Select device profiles error", err)
+	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("device_profile",
+		"id",
+		"tenant_id",
+		"created_at",
+		"updated_at",
+		"name",
+		"description",
+		"region",
+		"mac_version",
+		"reg_params_revision",
+		"adr_algorithm_id",
+		"payload_codec_runtime",
+		"payload_codec_script",
+		"uplink_interval",
+		"supports_otaa",
+		"supports_class_b",
+		"supports_class_c",
+		"class_b_timeout",
+		"class_b_ping_slot_nb_k",
+		"class_b_ping_slot_dr",
+		"class_b_ping_slot_freq",
+		"class_c_timeout",
+		"abp_rx1_delay",
+		"abp_rx1_dr_offset",
+		"abp_rx2_dr",
+		"abp_rx2_freq",
+		"tags",
+		"device_status_req_interval",
+		"flush_queue_on_activate",
+		"measurements",
+		"auto_detect_measurements",
+		"region_config_id",
+		"is_relay",
+		"is_relay_ed",
+		"relay_ed_relay_only",
+		"relay_enabled",
+		"relay_cad_periodicity",
+		"relay_default_channel_index",
+		"relay_second_channel_freq",
+		"relay_second_channel_dr",
+		"relay_second_channel_ack_offset",
+		"relay_ed_activation_mode",
+		"relay_ed_smart_enable_level",
+		"relay_ed_back_off",
+		"relay_ed_uplink_limit_bucket_size",
+		"relay_ed_uplink_limit_reload_rate",
+		"relay_join_req_limit_reload_rate",
+		"relay_notify_limit_reload_rate",
+		"relay_global_uplink_limit_reload_rate",
+		"relay_overall_limit_reload_rate",
+		"relay_join_req_limit_bucket_size",
+		"relay_notify_limit_bucket_size",
+		"relay_global_uplink_limit_bucket_size",
+		"relay_overall_limit_bucket_size",
+	))
+	if err != nil {
+		log.Fatal("Prepare device-profile statement error", err)
 	}
 
 	for _, nsDP := range nsDevProfiles {
-		asDP := ASDeviceProfile{}
-		if err := asDB.Get(&asDP, "select * from device_profile where device_profile_id = $1", nsDP.ID); err != nil {
-			log.Printf("Could not migrate device-profile, ID: %s, error: %s", nsDP.ID, err)
-			continue
-		}
+		found := false
 
-		codecScript := ""
-		if asDP.PayloadDecoderScript != "" {
-			codecScript = fmt.Sprintf(`
+		for _, asDP := range asDevProfiles {
+			if nsDP.ID != asDP.DeviceProfileID {
+				continue
+			}
+
+			found = true
+
+			codecScript := ""
+			if asDP.PayloadDecoderScript != "" {
+				codecScript = fmt.Sprintf(`
 // v3 to v4 compatibility wrapper
 function decodeUplink(input) {
 	return {
@@ -1002,130 +1233,84 @@ function encodeDownlink(input) {
 %s
 
 %s`, asDP.PayloadDecoderScript, asDP.PayloadEncoderScript)
+			}
+
+			payloadCodec := strings.TrimPrefix(asDP.PayloadCodec, "CUSTOM_")
+
+			_, err = stmt.Exec(
+				nsDP.ID,
+				intToUUID(asDP.OrganizationID),
+				asDP.CreatedAt,
+				asDP.UpdatedAt,
+				asDP.Name,
+				"",
+				nsDP.RFRegion,
+				nsDP.MACVersion,
+				nsDP.RegParamsRevision,
+				nsDP.ADRAlgorithmID,
+				payloadCodec,
+				codecScript,
+				asDP.UplinkInterval/time.Second,
+				nsDP.SupportsJoin,
+				nsDP.SupportsClassB,
+				nsDP.SupportsClassC,
+				nsDP.ClassBTimeout,
+				nsDP.PingSlotPeriod,
+				nsDP.PingSlotDR,
+				nsDP.PingSlotFreq,
+				nsDP.ClassCTimeout,
+				nsDP.RXDelay1,
+				nsDP.RXDROffset1,
+				nsDP.RXDataRate2,
+				nsDP.RXFreq2,
+				hstoreToJSON(asDP.Tags),
+				1,
+				true,
+				"{}",
+				true,
+				nil,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+			)
+			if err != nil {
+				log.Fatal("Exec device-profile statement error", err)
+			}
 		}
 
-		payloadCodec := strings.TrimPrefix(asDP.PayloadCodec, "CUSTOM_")
-
-		_, err = csDB.Exec(`
-			insert into device_profile (
-				id,
-				tenant_id,
-				created_at,
-				updated_at,
-				name,
-				description,
-				region,
-				mac_version,
-				reg_params_revision,
-				adr_algorithm_id,
-				payload_codec_runtime,
-				payload_codec_script,
-				uplink_interval,
-				supports_otaa,
-				supports_class_b,
-				supports_class_c,
-				class_b_timeout,
-				class_b_ping_slot_nb_k,
-				class_b_ping_slot_dr,
-				class_b_ping_slot_freq,
-				class_c_timeout,
-				abp_rx1_delay,
-				abp_rx1_dr_offset,
-				abp_rx2_dr,
-				abp_rx2_freq,
-				tags,
-				device_status_req_interval,
-				flush_queue_on_activate,
-				measurements,
-				auto_detect_measurements,
-				region_config_id,
-				is_relay,
-				is_relay_ed,
-				relay_ed_relay_only,
-				relay_enabled,
-				relay_cad_periodicity,
-				relay_default_channel_index,
-				relay_second_channel_freq,
-				relay_second_channel_dr,
-				relay_second_channel_ack_offset,
-				relay_ed_activation_mode,
-				relay_ed_smart_enable_level,
-				relay_ed_back_off,
-				relay_ed_uplink_limit_bucket_size,
-				relay_ed_uplink_limit_reload_rate,
-				relay_join_req_limit_reload_rate,
-				relay_notify_limit_reload_rate,
-				relay_global_uplink_limit_reload_rate,
-				relay_overall_limit_reload_rate,
-				relay_join_req_limit_bucket_size,
-				relay_notify_limit_bucket_size,
-				relay_global_uplink_limit_bucket_size,
-				relay_overall_limit_bucket_size
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-				$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-				$21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-				$31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-				$41, $42, $43, $44, $45, $46, $47, $48, $49, $50,
-				$51, $52, $53)`,
-			nsDP.ID,
-			intToUUID(asDP.OrganizationID),
-			asDP.CreatedAt,
-			asDP.UpdatedAt,
-			asDP.Name,
-			"",
-			nsDP.RFRegion,
-			nsDP.MACVersion,
-			nsDP.RegParamsRevision,
-			nsDP.ADRAlgorithmID,
-			payloadCodec,
-			codecScript,
-			asDP.UplinkInterval/time.Second,
-			nsDP.SupportsJoin,
-			nsDP.SupportsClassB,
-			nsDP.SupportsClassC,
-			nsDP.ClassBTimeout,
-			nsDP.PingSlotPeriod,
-			nsDP.PingSlotDR,
-			nsDP.PingSlotFreq,
-			nsDP.ClassCTimeout,
-			nsDP.RXDelay1,
-			nsDP.RXDROffset1,
-			nsDP.RXDataRate2,
-			nsDP.RXFreq2,
-			hstoreToJSON(asDP.Tags),
-			1,
-			true,
-			"{}",
-			true,
-			nil,
-			false,
-			false,
-			false,
-			false,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-		)
-		if err != nil {
-			panic(err)
+		if !found {
+			log.Printf("Device-profile not found in AS database, device_profile_id: %s", nsDP.ID)
 		}
 	}
 
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec device-profile statement error", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
+	}
 }
 
 func migrateDevicesFn() {
@@ -1169,107 +1354,148 @@ func migrateDevicesFn() {
 		IsDisabled                bool          `db:"-"`
 	}
 
-	devices := []NSDevice{}
-	err := nsDB.Select(&devices, "select * from device")
+	appSKeys := map[lorawan.EUI64]lorawan.AES128Key{}
+	nsDevices := []NSDevice{}
+	asDevices := []ASDevice{}
+	err := nsDB.Select(&nsDevices, "select * from device")
 	if err != nil {
-		panic(err)
+		log.Fatal("Select devices error", err)
 	}
 
-	for _, dev := range devices {
+	var deviceIDs [][]byte
+	for i := range nsDevices {
+		deviceIDs = append(deviceIDs, nsDevices[i].DevEUI[:])
+	}
+
+	err = asDB.Select(&asDevices, "select * from device where dev_eui = any($1)", pq.ByteaArray(deviceIDs))
+	if err != nil {
+		log.Fatal("Select devices error", err)
+	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("device",
+		"dev_eui",
+		"application_id",
+		"device_profile_id",
+		"created_at",
+		"updated_at",
+		"last_seen_at",
+		"scheduler_run_after",
+		"name",
+		"description",
+		"external_power_source",
+		"battery_level",
+		"margin",
+		"dr",
+		"latitude",
+		"longitude",
+		"altitude",
+		"dev_addr",
+		"enabled_class",
+		"skip_fcnt_check",
+		"is_disabled",
+		"tags",
+		"variables",
+		"join_eui",
+	))
+	if err != nil {
+		log.Fatal("Prepare device statement error", err)
+	}
+
+	for _, nsDev := range nsDevices {
+		found := false
+
 		// In v3 this column can be an empty string. In v4 the default value is "A".
-		if dev.Mode == "" {
-			dev.Mode = "A"
+		if nsDev.Mode == "" {
+			nsDev.Mode = "A"
 		}
 
-		// Device
-		asDEV := ASDevice{}
-		err := asDB.Get(&asDEV, "select * from device where dev_eui = $1", dev.DevEUI)
-		if err != nil {
-			log.Printf("Could not migrate device, DevEUI: %s, error: %s", dev.DevEUI, err)
-			continue
+		for _, asDev := range asDevices {
+			if !bytes.Equal(asDev.DevEUI, nsDev.DevEUI) {
+				continue
+			}
+
+			found = true
+
+			var devEUI lorawan.EUI64
+			var appSKey lorawan.AES128Key
+			copy(devEUI[:], asDev.DevEUI)
+			copy(appSKey[:], asDev.AppSKey)
+			appSKeys[devEUI] = appSKey
+
+			_, err = stmt.Exec(
+				nsDev.DevEUI,
+				intToUUID(asDev.ApplicationID),
+				asDev.DeviceProfileID,
+				asDev.CreatedAt,
+				asDev.UpdatedAt,
+				asDev.LastSeenAt,
+				time.Now(),
+				asDev.Name,
+				asDev.Description,
+				asDev.DeviceStatusExternalPower,
+				asDev.DeviceStatusBattery,
+				asDev.DeviceStatusMargin,
+				asDev.DR,
+				asDev.Latitude,
+				asDev.Longitude,
+				asDev.Altitude,
+				asDev.DevAddr,
+				nsDev.Mode,
+				nsDev.SkipFCntCheck,
+				nsDev.IsDisabled,
+				hstoreToJSON(asDev.Tags),
+				hstoreToJSON(asDev.Variables),
+				[]byte{0, 0, 0, 0, 0, 0, 0, 0},
+			)
+			if err != nil {
+				log.Fatal("Execute device statement error", err)
+			}
 		}
 
-		_, err = csDB.Exec(`
-			insert into device (
-				dev_eui,
-				application_id,
-				device_profile_id,
-				created_at,
-				updated_at,
-				last_seen_at,
-				scheduler_run_after,
-				name,
-				description,
-				external_power_source,
-				battery_level,
-				margin,
-				dr,
-				latitude,
-				longitude,
-				altitude,
-				dev_addr,
-				enabled_class,
-				skip_fcnt_check,
-				is_disabled,
-				tags,
-				variables,
-				join_eui
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
-			dev.DevEUI,
-			intToUUID(asDEV.ApplicationID),
-			asDEV.DeviceProfileID,
-			asDEV.CreatedAt,
-			asDEV.UpdatedAt,
-			asDEV.LastSeenAt,
-			time.Now(),
-			asDEV.Name,
-			asDEV.Description,
-			asDEV.DeviceStatusExternalPower,
-			asDEV.DeviceStatusBattery,
-			asDEV.DeviceStatusMargin,
-			asDEV.DR,
-			asDEV.Latitude,
-			asDEV.Longitude,
-			asDEV.Altitude,
-			asDEV.DevAddr,
-			dev.Mode,
-			dev.SkipFCntCheck,
-			dev.IsDisabled,
-			hstoreToJSON(asDEV.Tags),
-			hstoreToJSON(asDEV.Variables),
-			[]byte{0, 0, 0, 0, 0, 0, 0, 0},
-		)
-		if err != nil {
-			panic(err)
+		if !found {
+			log.Printf("Device not found in AS database, dev_eui: %s", hex.EncodeToString(nsDev.DevEUI))
 		}
+	}
 
-		// Migrate device keys
-		migrateDeviceKeys(asDEV.DevEUI)
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec device statement error", err)
+	}
 
-		// Migrate device queue
-		migrateDeviceQueue(asDEV.DevEUI, asDEV.AppSKey)
+	// // Migrate device keys
+	migrateDeviceKeysFn(tx, deviceIDs)
+	migrateDeviceQueueFn(tx, deviceIDs, appSKeys)
 
-		// Migrate metrics
-		migrateDeviceMetrics(dev.DevEUI)
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error", err)
+	}
 
-		// Device session
-		ds, err := getDeviceSession(dev.DevEUI, asDEV.AppSKey)
-		if err != nil {
-			// Device-session not found error
-			continue
-		}
-		saveDeviceSession(ds)
+	// We have to migrate the Redis data per DevEUI because the data might be
+	// sharded and different DevEUIs might map to different hash slots.
 
-		// Device - gateway
-		devGW, err := getDeviceGateway(dev.DevEUI)
-		if err != nil {
-			continue
-		}
-		saveDeviceGateway(devGW)
+	log.Println("Migrating device metrics")
+	for devEUI := range appSKeys {
+		migrateDeviceMetricsFn(devEUI[:])
+	}
+
+	log.Println("Migrating device-sessions")
+	for devEUI, appSKey := range appSKeys {
+		migrateDeviceSessionFn(devEUI[:], appSKey[:])
+	}
+
+	log.Println("Migrate device <> gateway")
+	for devEUI := range appSKeys {
+		migrateDeviceGatewayFn(devEUI[:])
 	}
 }
 
-func migrateDeviceKeys(devEUI []byte) {
+func migrateDeviceKeysFn(tx *sqlx.Tx, devEUIs [][]byte) {
 	log.Println("Migrating device-keys")
 
 	type DeviceKeys struct {
@@ -1280,30 +1506,47 @@ func migrateDeviceKeys(devEUI []byte) {
 		AppKey    []byte    `db:"app_key"`
 		JoinNonce int       `db:"join_nonce"`
 	}
-	deviceKeys := []DeviceKeys{}
-	err := asDB.Select(&deviceKeys, "select * from device_keys where dev_eui = $1", devEUI)
-	if err != nil {
-		log.Printf("Could not migrate device-keys, DevEUI: %s, error: %s", devEUI, err)
-		return
+
+	type DeviceDevNonce struct {
+		DevEUI   []byte `db:"dev_eui"`
+		DevNonce int64  `db:"dev_nonce"`
 	}
 
-	devNonces := []int64{}
-	err = nsDB.Select(&devNonces, "select dev_nonce from device_activation where dev_eui = $1", devEUI)
+	deviceKeys := []DeviceKeys{}
+	err := asDB.Select(&deviceKeys, "select * from device_keys where dev_eui = any($1)", pq.ByteaArray(devEUIs))
 	if err != nil {
-		panic(err)
+		log.Fatal("Select device-keys error", err)
+	}
+
+	devDevNonces := []DeviceDevNonce{}
+	err = nsDB.Select(&devDevNonces, "select dev_eui, dev_nonce from device_activation where dev_eui = any($1)", pq.ByteaArray(devEUIs))
+	if err != nil {
+		log.Fatal("Select device activation error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("device_keys",
+		"dev_eui",
+		"created_at",
+		"updated_at",
+		"nwk_key",
+		"app_key",
+		"dev_nonces",
+		"join_nonce",
+	))
+	if err != nil {
+		log.Fatal("Prepare device-keys statement error", err)
 	}
 
 	for _, dk := range deviceKeys {
-		_, err = csDB.Exec(`
-			insert into device_keys (
-				dev_eui,
-				created_at,
-				updated_at,
-				nwk_key,
-				app_key,
-				dev_nonces,
-				join_nonce
-			) values ($1, $2, $3, $4, $5, $6, $7)`,
+		devNonces := []int64{}
+
+		for _, dn := range devDevNonces {
+			if bytes.Equal(dn.DevEUI, dk.DevEUI) {
+				devNonces = append(devNonces, dn.DevNonce)
+			}
+		}
+
+		_, err = stmt.Exec(
 			dk.DevEUI,
 			dk.CreatedAt,
 			dk.UpdatedAt,
@@ -1313,16 +1556,18 @@ func migrateDeviceKeys(devEUI []byte) {
 			dk.JoinNonce,
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Execute device-keys statement error", err)
 		}
 	}
 
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Execute device-keys statement error", err)
+	}
 }
 
-func migrateDeviceQueue(devEUI []byte, appSKeyB []byte) {
+func migrateDeviceQueueFn(tx *sqlx.Tx, devEUIs [][]byte, appSKeys map[lorawan.EUI64]lorawan.AES128Key) {
 	log.Println("Migrating device-queue")
-	var appSKey lorawan.AES128Key
-	copy(appSKey[:], appSKeyB)
 
 	type DeviceQueueItem struct {
 		ID                      int64          `db:"id"`
@@ -1341,32 +1586,39 @@ func migrateDeviceQueue(devEUI []byte, appSKeyB []byte) {
 	}
 
 	queueItems := []DeviceQueueItem{}
-	err := nsDB.Select(&queueItems, "select * from device_queue where dev_eui = $1", devEUI)
+	err := nsDB.Select(&queueItems, "select * from device_queue where dev_eui = any($1)", pq.ByteaArray(devEUIs))
 	if err != nil {
-		panic(err)
+		log.Fatal("Select device-queue items error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("device_queue_item",
+		"id",
+		"dev_eui",
+		"created_at",
+		"f_port",
+		"confirmed",
+		"data",
+		"is_pending",
+		"f_cnt_down",
+		"timeout_after",
+	))
+	if err != nil {
+		log.Fatal("Prepare device-queue-item statement error", err)
 	}
 
 	for _, qi := range queueItems {
 		var devAddr lorawan.DevAddr
 		copy(devAddr[:], qi.DevAddr)
 
-		pt, err := lorawan.EncryptFRMPayload(appSKey, false, devAddr, qi.FCnt, qi.FRMPayload)
+		var devEUI lorawan.EUI64
+		copy(devEUI[:], qi.DevEUI)
+
+		pt, err := lorawan.EncryptFRMPayload(appSKeys[devEUI], false, devAddr, qi.FCnt, qi.FRMPayload)
 		if err != nil {
 			panic(err)
 		}
 
-		_, err = csDB.Exec(`
-			insert into device_queue_item (
-				id,
-				dev_eui,
-				created_at,
-				f_port,
-				confirmed,
-				data,
-				is_pending,
-				f_cnt_down,
-				timeout_after
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		_, err = stmt.Exec(
 			intToUUID(qi.ID),
 			qi.DevEUI,
 			qi.CreatedAt,
@@ -1378,8 +1630,13 @@ func migrateDeviceQueue(devEUI []byte, appSKeyB []byte) {
 			qi.TimeoutAfter,
 		)
 		if err != nil {
-			panic(err)
+			log.Fatal("Execute device-queue-item statement error", err)
 		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Execute device-queue-item statement error", err)
 	}
 }
 
@@ -1398,6 +1655,15 @@ func hstoreToJSON(h hstore.Hstore) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+func migrateDeviceSessionFn(devEUI []byte, appSKey []byte) {
+	ds, err := getDeviceSession(devEUI, appSKey)
+	if err != nil {
+		// We don't know if there is a device-session
+		return
+	}
+	saveDeviceSession(ds)
 }
 
 func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error) {
@@ -1514,10 +1780,22 @@ func saveDeviceSession(ds pbnew.DeviceSession) {
 		panic(err)
 	}
 
+	// On purpose, this is not part of the above pipeline as the devAddrKey and
+	// devSessKey do not share the same hash tags and are therefore not
+	// guaranteed to be on the same server / shard.
 	err = csRedis.Set(context.Background(), devSessKey, b, time.Duration(csSessionTTL)*time.Hour*24).Err()
 	if err != nil {
 		panic(err)
 	}
+}
+
+func migrateDeviceGatewayFn(devEUI []byte) {
+	devGW, err := getDeviceGateway(devEUI)
+	if err != nil {
+		return
+	}
+
+	saveDeviceGateway(devGW)
 }
 
 func getDeviceGateway(devEUI []byte) (pbnew.DeviceGatewayRxInfo, error) {
@@ -1572,17 +1850,35 @@ func saveDeviceGateway(devGW pbnew.DeviceGatewayRxInfo) {
 	}
 }
 
-func migrateDeviceMetrics(devEUI []byte) {
-	key := fmt.Sprintf("%slora:as:metrics:{device:%s}:*", asPrefix, hex.EncodeToString(devEUI))
+func migrateDeviceMetricsFn(devEUI []byte) {
+	devEUIStr := hex.EncodeToString(devEUI)
+	key := fmt.Sprintf("%slora:as:metrics:{device:%s}:*", asPrefix, devEUIStr)
 	keys, err := asRedis.Keys(context.Background(), key).Result()
 	if err != nil {
 		panic(err)
 	}
 
+	asPipe := asRedis.Pipeline()
+	cmds := map[string]*redis.StringStringMapCmd{}
+
 	for _, key := range keys {
-		vals, err := asRedis.HGetAll(context.Background(), key).Result()
+		cmds[key] = asPipe.HGetAll(context.Background(), key)
+	}
+
+	_, err = asPipe.Exec(context.Background())
+	if err != nil {
+		log.Fatalf("Get device-metrics error, dev_eui: %s, error: %s", devEUIStr, err)
+	}
+
+	csPipe := csRedis.Pipeline()
+	for key, resp := range cmds {
+		if resp.Err() != nil {
+			log.Fatalf("Get device-metrics error, dev_eui: %s, error: %s", devEUIStr, err)
+		}
+
+		vals, err := resp.Result()
 		if err != nil {
-			panic(err)
+			log.Fatalf("Get device-metrics error, dev_eui: %s, error: %s", devEUIStr, err)
 		}
 
 		keyParts := strings.Split(key, ":")
@@ -1602,16 +1898,16 @@ func migrateDeviceMetrics(devEUI []byte) {
 			"MONTH": time.Hour * 24 * 31 * 365 * 2,
 		}
 
-		if err := csRedis.HSet(context.Background(), newKey, vals).Err(); err != nil {
-			log.Printf("Migrate device metrics error: %s", err)
-		}
-		if err := csRedis.PExpire(context.Background(), newKey, ttl[aggregation]).Err(); err != nil {
-			panic(err)
-		}
+		csPipe.HSet(context.Background(), newKey, vals)
+		csPipe.PExpire(context.Background(), newKey, ttl[aggregation])
+	}
+	_, err = csPipe.Exec(context.Background())
+	if err != nil {
+		log.Fatalf("Store device-metrics error, dev_eui: %s, error: %s", devEUIStr, err)
 	}
 }
 
-func migrateGatewayMetrics(gatewayID []byte) {
+func migrateGatewayMetricsFn(gatewayID []byte) {
 	key := fmt.Sprintf("%slora:as:metrics:{gw:%s}:*", asPrefix, hex.EncodeToString(gatewayID))
 	keys, err := asRedis.Keys(context.Background(), key).Result()
 	if err != nil {
