@@ -1859,7 +1859,7 @@ func migrateDeviceMetricsFn(devEUI []byte) {
 	key := fmt.Sprintf("%slora:as:metrics:{device:%s}:*", asPrefix, devEUIStr)
 	keys, err := asRedis.Keys(context.Background(), key).Result()
 	if err != nil {
-		panic(err)
+		log.Fatalf("Get device-metrics keys error: %s", err)
 	}
 
 	asPipe := asRedis.Pipeline()
@@ -1912,16 +1912,34 @@ func migrateDeviceMetricsFn(devEUI []byte) {
 }
 
 func migrateGatewayMetricsFn(gatewayID []byte) {
-	key := fmt.Sprintf("%slora:as:metrics:{gw:%s}:*", asPrefix, hex.EncodeToString(gatewayID))
+	gatewayIDStr := hex.EncodeToString(gatewayID)
+	key := fmt.Sprintf("%slora:as:metrics:{gw:%s}:*", asPrefix, gatewayIDStr)
 	keys, err := asRedis.Keys(context.Background(), key).Result()
 	if err != nil {
-		panic(err)
+		log.Fatalf("Get gateway-metrics keys error: %s", err)
 	}
 
+	asPipe := asRedis.Pipeline()
+	cmds := map[string]*redis.StringStringMapCmd{}
+
 	for _, key := range keys {
-		vals, err := asRedis.HGetAll(context.Background(), key).Result()
-		if err != nil {
-			panic(err)
+		cmds[key] = asPipe.HGetAll(context.Background(), key)
+	}
+
+	_, err = asPipe.Exec(context.Background())
+	if err != nil {
+		log.Fatalf("Get gateway-metrics error, gateway_id: %s, error: %s", gatewayIDStr, err)
+	}
+
+	csPipe := csRedis.Pipeline()
+	for key, resp := range cmds {
+		if resp.Err() != nil {
+			log.Fatalf("Get gateway-metrics error, gateway_id: %s, error: %", gatewayIDStr, err)
+		}
+
+		vals, err := resp.Result()
+		if resp.Err() != nil {
+			log.Fatalf("Get gateway-metrics error, gateway_id: %s, error: %", gatewayIDStr, err)
 		}
 
 		keyParts := strings.Split(key, ":")
@@ -1941,12 +1959,12 @@ func migrateGatewayMetricsFn(gatewayID []byte) {
 			"MONTH": time.Hour * 24 * 31 * 365 * 2,
 		}
 
-		if err := csRedis.HSet(context.Background(), newKey, vals).Err(); err != nil {
-			log.Printf("Migrate gateway metrics error: %s", err)
-		}
-		if err := csRedis.PExpire(context.Background(), newKey, ttl[aggregation]).Err(); err != nil {
-			panic(err)
-		}
+		csPipe.HSet(context.Background(), newKey, vals)
+		csPipe.PExpire(context.Background(), newKey, ttl[aggregation])
+	}
+	_, err = csPipe.Exec(context.Background())
+	if err != nil {
+		log.Fatalf("Store gateway-metrics error, gateway_id: %s, error: %s", gatewayIDStr, err)
 	}
 }
 
