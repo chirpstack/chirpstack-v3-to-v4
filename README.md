@@ -16,6 +16,7 @@ Flags:
       --deveui-list-file string              Path to file containing DevEUIs to migrate (one DevEUI per line)
       --device-profile-id-list-file string   Path to file containing list of Device Profile IDs to migrate (one per line)
       --device-session-ttl-days int          Device-session TTL in days (default 31)
+      --disable-migrated-devices             Disable migrated devices in ChirpStack v3
       --drop-tenants-and-users               Drop tenants and users before migration
   -h, --help                                 help for chirpstack-v3-to-v4
       --migrate-applications                 Migrate applications (default true)

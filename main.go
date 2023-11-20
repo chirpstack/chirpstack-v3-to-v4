@@ -46,6 +46,7 @@ var (
 	migrateDevices          bool
 	migrateGatewayMetrics   bool
 	migrateDeviceMetrics    bool
+	disableMigratedDevices  bool
 )
 
 // Internal state
@@ -92,6 +93,7 @@ func init() {
 	rootCmd.PersistentFlags().StringArrayVarP(&nsConfigFiles, "ns-config-file", "", []string{}, "Path to chirpstack-network-server.toml configuration file (can be repeated)")
 	rootCmd.PersistentFlags().StringVarP(&devEUIListFile, "deveui-list-file", "", "", "Path to file containing DevEUIs to migrate (one DevEUI per line)")
 	rootCmd.PersistentFlags().StringVarP(&deviceProfileIDListFile, "device-profile-id-list-file", "", "", "Path to file containing list of Device Profile IDs to migrate (one per line)")
+	rootCmd.PersistentFlags().BoolVarP(&disableMigratedDevices, "disable-migrated-devices", "", false, "Disable migrated devices in ChirpStack v3")
 	rootCmd.PersistentFlags().IntVarP(&csSessionTTL, "device-session-ttl-days", "", 31, "Device-session TTL in days")
 	rootCmd.PersistentFlags().BoolVarP(&dropTenantAndUsers, "drop-tenants-and-users", "", false, "Drop tenants and users before migration")
 	rootCmd.PersistentFlags().BoolVarP(&migrateUsers, "migrate-users", "", true, "Migrate users")
@@ -1584,6 +1586,14 @@ func migrateDevicesFn() {
 	log.Println("Migrate device <> gateway")
 	for devEUI := range appSKeys {
 		migrateDeviceGatewayFn(devEUI[:])
+	}
+
+	if disableMigratedDevices {
+		log.Println("Disable migrated devices")
+		_, err := nsDB.Exec("update device set is_disabled = true where dev_eui = any($1)", pq.ByteaArray(deviceIDs))
+		if err != nil {
+			log.Fatal("Disable migrated devices error", err)
+		}
 	}
 }
 
