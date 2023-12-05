@@ -1284,6 +1284,7 @@ func migrateDeviceProfilesFn() {
 		"relay_notify_limit_bucket_size",
 		"relay_global_uplink_limit_bucket_size",
 		"relay_overall_limit_bucket_size",
+		"allow_roaming",
 	))
 	if err != nil {
 		log.Fatal("Prepare device-profile statement error", err)
@@ -1376,6 +1377,7 @@ function encodeDownlink(input) {
 				0,
 				0,
 				0,
+				true,
 			)
 			if err != nil {
 				log.Fatal("Exec device-profile statement error", err)
