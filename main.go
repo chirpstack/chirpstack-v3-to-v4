@@ -657,10 +657,11 @@ func migrateApplicationIntegrationsFn() {
 
 	for _, i := range ints {
 		_, err := stmt.Exec(
+			intToUUID(i.ApplicationID),
 			getIntegrationKind(i.Kind),
 			i.CreatedAt,
 			i.UpdatedAt,
-			getIntegrationConfiguration(i.Kind, i.Settings),
+			string(getIntegrationConfiguration(i.Kind, i.Settings)),
 		)
 		if err != nil {
 			log.Fatal("Exec application integrations statement error", err)
@@ -935,7 +936,7 @@ func getIntegrationKind(k string) string {
 	return ""
 }
 
-func getIntegrationConfiguration(kind string, raw json.RawMessage) json.RawMessage {
+func getIntegrationConfiguration(kind string, raw json.RawMessage) []byte {
 	out := make(map[string]interface{})
 
 	// HTTP
