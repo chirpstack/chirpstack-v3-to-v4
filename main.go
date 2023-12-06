@@ -1751,7 +1751,7 @@ func migrateDevicesFn() {
 		found := false
 
 		// In v3 this column can be an empty string. In v4 the default value is "A".
-		if nsDev.Mode == "" {
+		if strings.ReplaceAll(nsDev.Mode, " ", "") == "" {
 			nsDev.Mode = "A"
 		}
 
