@@ -45,7 +45,7 @@ database will be removed!
 
 ## Notes
 
-* This utility is compatible with the ChirpStack v4.4.0 or later database schema.
+* This utility is compatible with the ChirpStack v4.6.0 database schema.
 * This utility does not support [environment variables](https://www.chirpstack.io/docs/chirpstack/configuration.html#environment-variables) in configuration files, like ChirpStack does.
 
 ## Building from source

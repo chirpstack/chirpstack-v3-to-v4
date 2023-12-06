@@ -44,6 +44,7 @@ var (
 	migrateGateways         bool
 	migrateDeviceProfiles   bool
 	migrateDevices          bool
+	migrateMulticastGroups  bool
 	migrateGatewayMetrics   bool
 	migrateDeviceMetrics    bool
 	disableMigratedDevices  bool
@@ -60,6 +61,7 @@ var (
 	nsPrefix            string
 	asPrefix            string
 	csPrefix            string
+	nsBand              string
 	devEUIsList         [][]byte
 	deviceProfileIDList []uuid.UUID
 )
@@ -85,6 +87,12 @@ type Config struct {
 		TLSEnabled bool     `mapstructure:"tls_enabled"`
 		KeyPrefix  string   `mapstructure:"key_prefix"`
 	} `mapstructure:"redis"`
+
+	NetworkServer struct {
+		Band struct {
+			Name string `mapstructure:"name"`
+		} `mapstructure:"band"`
+	} `mapstructure:"network_server"`
 }
 
 func init() {
@@ -102,6 +110,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&migrateGateways, "migrate-gateways", "", true, "Migrate gateways")
 	rootCmd.PersistentFlags().BoolVarP(&migrateDeviceProfiles, "migrate-device-profiles", "", true, "Migrate device profiles")
 	rootCmd.PersistentFlags().BoolVarP(&migrateDevices, "migrate-devices", "", true, "Migrate devices")
+	rootCmd.PersistentFlags().BoolVarP(&migrateMulticastGroups, "migrate-multicast-groups", "", true, "Migrate multicast-groups")
 	rootCmd.PersistentFlags().BoolVarP(&migrateGatewayMetrics, "migrate-gateway-metrics", "", true, "Migrate gateway metrics")
 	rootCmd.PersistentFlags().BoolVarP(&migrateDeviceMetrics, "migrate-device-metrics", "", true, "Migrate device metrics")
 }
@@ -216,6 +225,9 @@ func run(cmd *cobra.Command, args []string) error {
 		nsRedis = getRedisClient(nsConfig)
 		nsDB = getPostgresClient(nsConfig)
 		nsPrefix = nsConfig.Redis.KeyPrefix
+		nsBand = nsConfig.NetworkServer.Band.Name
+
+		log.Printf("Migrating region: %s", nsBand)
 
 		if migrateGateways {
 			migrateGatewaysFn()
@@ -227,6 +239,10 @@ func run(cmd *cobra.Command, args []string) error {
 
 		if migrateDevices {
 			migrateDevicesFn()
+		}
+
+		if migrateMulticastGroups {
+			migrateMulticastGroupsFn()
 		}
 	}
 
@@ -659,6 +675,236 @@ func migrateApplicationIntegrationsFn() {
 	err = tx.Commit()
 	if err != nil {
 		log.Fatal("Commit transaction error", err)
+	}
+}
+
+func migrateMulticastGroupsFn() {
+	log.Println("Migrating multicast-groups")
+
+	type NSMulticastGroup struct {
+		ID               uuid.UUID         `db:"id"`
+		CreatedAt        time.Time         `db:"created_at"`
+		UpdatedAt        time.Time         `db:"updated_at"`
+		MCAddr           lorawan.DevAddr   `db:"mc_addr"`
+		MCNwkSKey        lorawan.AES128Key `db:"mc_nwk_s_key"`
+		FCnt             uint32            `db:"f_cnt"`
+		GroupType        string            `db:"group_type"`
+		DR               uint8             `db:"dr"`
+		Frequency        uint32            `db:"frequency"`
+		PingSlotPeriod   uint32            `db:"ping_slot_period"`
+		RoutingProfileID uuid.UUID         `db:"routing_profile_id"`
+		ServiceProfileID uuid.UUID         `db:"service_profile_id"`
+	}
+
+	type ASMulticastGroup struct {
+		ID            uuid.UUID         `db:"id"`
+		CreatedAt     time.Time         `db:"created_at"`
+		UpdatedAt     time.Time         `db:"updated_at"`
+		Name          string            `db:"name"`
+		MCAppSKey     lorawan.AES128Key `db:"mc_app_s_key"`
+		ApplicationID int64             `db:"application_id"`
+	}
+
+	nsMulticastGroups := []NSMulticastGroup{}
+	asMulticastGroups := []ASMulticastGroup{}
+	err := nsDB.Select(&nsMulticastGroups, "select * from multicast_group")
+	if err != nil {
+		log.Fatal("Select multicast groups error", err)
+	}
+
+	var mcIDs []uuid.UUID
+	for i := range nsMulticastGroups {
+		mcIDs = append(mcIDs, nsMulticastGroups[i].ID)
+	}
+
+	err = asDB.Select(&asMulticastGroups, "select * from multicast_group where id = any($1)", pq.Array(mcIDs))
+	if err != nil {
+		log.Fatal("Select multicast groups error", err)
+	}
+
+	tx, err := csDB.Beginx()
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("multicast_group",
+		"id",
+		"application_id",
+		"created_at",
+		"updated_at",
+		"name",
+		"region",
+		"mc_addr",
+		"mc_nwk_s_key",
+		"mc_app_s_key",
+		"f_cnt",
+		"group_type",
+		"dr",
+		"frequency",
+		"class_b_ping_slot_period",
+		"class_c_scheduling_type",
+	))
+	if err != nil {
+		log.Fatal("Prepare multicast-group statement error", err)
+	}
+
+	for _, nsMCGroup := range nsMulticastGroups {
+		found := false
+
+		for _, asMCGroup := range asMulticastGroups {
+			if nsMCGroup.ID != asMCGroup.ID {
+				continue
+			}
+
+			found = true
+
+			_, err = stmt.Exec(
+				nsMCGroup.ID,
+				intToUUID(asMCGroup.ApplicationID),
+				asMCGroup.CreatedAt,
+				asMCGroup.UpdatedAt,
+				asMCGroup.Name,
+				nsBand,
+				nsMCGroup.MCAddr,
+				nsMCGroup.MCNwkSKey,
+				asMCGroup.MCAppSKey,
+				nsMCGroup.FCnt,
+				nsMCGroup.GroupType,
+				nsMCGroup.DR,
+				nsMCGroup.Frequency,
+				nsMCGroup.PingSlotPeriod,
+				"DELAY",
+			)
+			if err != nil {
+				log.Fatal("Execute multicast-group statement error", err)
+			}
+		}
+
+		if !found {
+			log.Printf("Multicast-group not found in AS database, id: %s", nsMCGroup.ID)
+		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Exec multicast-group statement error", err)
+	}
+
+	migrateMulticastGroupDevicesFn(tx)
+	migrateMulticastGroupQueueFn(tx)
+
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal("Commit transaction error")
+	}
+}
+
+func migrateMulticastGroupDevicesFn(tx *sqlx.Tx) {
+	log.Println("Migrating multicast-group devices")
+
+	type MulticastDevice struct {
+		DevEUI           lorawan.EUI64 `db:"dev_eui"`
+		MulticastGroupID uuid.UUID     `db:"multicast_group_id"`
+		CreatedAt        time.Time     `db:"created_at"`
+	}
+
+	multicastDevices := []MulticastDevice{}
+	if len(devEUIsList) == 0 {
+		err := nsDB.Select(&multicastDevices, "select * from device_multicast_group")
+		if err != nil {
+			log.Fatal("Select multicast-group devices error", err)
+		}
+	} else {
+		err := nsDB.Select(&multicastDevices, "select * from device_multicast_group where dev_eui = any($1)", pq.ByteaArray(devEUIsList))
+		if err != nil {
+			log.Fatal("Select multicast-group devices error", err)
+		}
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("multicast_group_device",
+		"multicast_group_id",
+		"dev_eui",
+		"created_at",
+	))
+	if err != nil {
+		log.Fatal("Begin transaction error", err)
+	}
+
+	for _, mcDevice := range multicastDevices {
+		_, err = stmt.Exec(
+			mcDevice.MulticastGroupID,
+			mcDevice.DevEUI,
+			mcDevice.CreatedAt,
+		)
+		if err != nil {
+			log.Fatal("Execute multicast-group device statement error", err)
+		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Execute multicast-group device statement error", err)
+	}
+}
+
+func migrateMulticastGroupQueueFn(tx *sqlx.Tx) {
+	log.Println("Migrating multicast-group queue")
+
+	type MulticastGroupQueueItem struct {
+		ID                      int64         `db:"id"`
+		CreatedAt               time.Time     `db:"created_at"`
+		ScheduleAt              time.Time     `db:"schedule_at"`
+		EmitAtTimeSinceGPSEpoch *int64        `db:"emit_at_time_since_gps_epoch"`
+		MulticastGroupID        uuid.UUID     `db:"multicast_group_id"`
+		GatewayID               lorawan.EUI64 `db:"gateway_id"`
+		FCnt                    uint32        `db:"f_cnt"`
+		FPort                   uint32        `db:"f_port"`
+		FRMPayload              []byte        `db:"frm_payload"`
+		UpdatedAt               time.Time     `db:"updated_at"`
+		RetryAfter              *time.Time    `db:"retry_after"`
+	}
+
+	mcQueueItems := []MulticastGroupQueueItem{}
+	err := nsDB.Select(&mcQueueItems, "select * from multicast_queue")
+	if err != nil {
+		log.Panic("Select multicast-group queue error", err)
+	}
+
+	stmt, err := tx.Prepare(pq.CopyIn("multicast_group_queue_item",
+		"id",
+		"created_at",
+		"scheduler_run_after",
+		"multicast_group_id",
+		"gateway_id",
+		"f_cnt",
+		"f_port",
+		"data",
+		"emit_at_time_since_gps_epoch",
+	))
+	if err != nil {
+		log.Fatal("Prepare multicast-group queue statement error", err)
+	}
+
+	for _, mcQueueItem := range mcQueueItems {
+		_, err = stmt.Exec(
+			intToUUID(mcQueueItem.ID),
+			mcQueueItem.CreatedAt,
+			mcQueueItem.ScheduleAt,
+			mcQueueItem.MulticastGroupID,
+			mcQueueItem.GatewayID,
+			mcQueueItem.FCnt,
+			mcQueueItem.FPort,
+			mcQueueItem.FRMPayload,
+			mcQueueItem.EmitAtTimeSinceGPSEpoch,
+		)
+		if err != nil {
+			log.Fatal("Execute multicast-group queue statement error", err)
+		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Fatal("Execute multicast-group queue statement error", err)
 	}
 }
 
