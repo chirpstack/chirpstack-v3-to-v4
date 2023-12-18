@@ -1952,6 +1952,7 @@ func migrateDeviceQueueFn(tx *sqlx.Tx, devEUIs [][]byte, appSKeys map[lorawan.EU
 		"is_pending",
 		"f_cnt_down",
 		"timeout_after",
+		"is_encrypted",
 	))
 	if err != nil {
 		log.Fatal("Prepare device-queue-item statement error", err)
@@ -1979,6 +1980,7 @@ func migrateDeviceQueueFn(tx *sqlx.Tx, devEUIs [][]byte, appSKeys map[lorawan.EU
 			qi.IsPending,
 			qi.FCnt,
 			qi.TimeoutAfter,
+			false,
 		)
 		if err != nil {
 			log.Fatal("Execute device-queue-item statement error", err)
