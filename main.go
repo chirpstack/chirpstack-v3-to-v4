@@ -2248,7 +2248,7 @@ func migrateDeviceMetricsFn(devEUI []byte) {
 		ttl := map[string]time.Duration{
 			"HOUR":  time.Hour * 24 * 2,
 			"DAY":   time.Hour * 24 * 31 * 2,
-			"MONTH": time.Hour * 24 * 31 * 365 * 2,
+			"MONTH": time.Hour * 24 * 31 * 12 * 2,
 		}
 
 		csPipe.HSet(context.Background(), newKey, vals)
