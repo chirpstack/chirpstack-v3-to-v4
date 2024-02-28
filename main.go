@@ -1742,6 +1742,8 @@ func migrateDevicesFn() {
 		"tags",
 		"variables",
 		"join_eui",
+		"secondary_dev_addr",
+		"device_session",
 	))
 	if err != nil {
 		log.Fatal("Prepare device statement error", err)
@@ -1764,9 +1766,22 @@ func migrateDevicesFn() {
 
 			var devEUI lorawan.EUI64
 			var appSKey lorawan.AES128Key
+			var deviceSession *[]byte
+
 			copy(devEUI[:], asDev.DevEUI)
 			copy(appSKey[:], asDev.AppSKey)
 			appSKeys[devEUI] = appSKey
+
+			ds, err := getDeviceSession(devEUI[:], appSKey[:])
+			if err == nil {
+				// Make sure we have the DevAddr from the device-session
+				copy(asDev.DevAddr[:], ds.DevAddr)
+
+				b, err := proto.Marshal(&ds)
+				if err == nil {
+					deviceSession = &b
+				}
+			}
 
 			_, err = stmt.Exec(
 				nsDev.DevEUI,
@@ -1792,6 +1807,8 @@ func migrateDevicesFn() {
 				hstoreToJSON(asDev.Tags),
 				hstoreToJSON(asDev.Variables),
 				[]byte{0, 0, 0, 0, 0, 0, 0, 0},
+				nil,
+				deviceSession,
 			)
 			if err != nil {
 				log.Fatal("Execute device statement error", err)
@@ -1825,11 +1842,6 @@ func migrateDevicesFn() {
 		for devEUI := range appSKeys {
 			migrateDeviceMetricsFn(devEUI[:])
 		}
-	}
-
-	log.Println("Migrating device-sessions")
-	for devEUI, appSKey := range appSKeys {
-		migrateDeviceSessionFn(devEUI[:], appSKey[:])
 	}
 
 	log.Println("Migrate device <> gateway")
@@ -2010,15 +2022,6 @@ func hstoreToJSON(h hstore.Hstore) string {
 	return string(b)
 }
 
-func migrateDeviceSessionFn(devEUI []byte, appSKey []byte) {
-	ds, err := getDeviceSession(devEUI, appSKey)
-	if err != nil {
-		// We don't know if there is a device-session
-		return
-	}
-	saveDeviceSession(ds)
-}
-
 func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error) {
 	key := fmt.Sprintf("%slora:ns:device:%s", nsPrefix, hex.EncodeToString(devEUI))
 	var dsOld pbold.DeviceSessionPB
@@ -2115,31 +2118,6 @@ func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error
 	}
 
 	return dsNew, nil
-}
-
-func saveDeviceSession(ds pbnew.DeviceSession) {
-	devAddrKey := fmt.Sprintf("%sdevaddr:{%s}", csPrefix, hex.EncodeToString(ds.DevAddr))
-	devSessKey := fmt.Sprintf("%sdevice:{%s}:ds", csPrefix, hex.EncodeToString(ds.DevEui))
-
-	b, err := proto.Marshal(&ds)
-	if err != nil {
-		panic(err)
-	}
-
-	pipe := csRedis.TxPipeline()
-	pipe.SAdd(context.Background(), devAddrKey, ds.DevEui)
-	pipe.PExpire(context.Background(), devAddrKey, time.Duration(csSessionTTL)*time.Hour*24)
-	if _, err := pipe.Exec(context.Background()); err != nil {
-		panic(err)
-	}
-
-	// On purpose, this is not part of the above pipeline as the devAddrKey and
-	// devSessKey do not share the same hash tags and are therefore not
-	// guaranteed to be on the same server / shard.
-	err = csRedis.Set(context.Background(), devSessKey, b, time.Duration(csSessionTTL)*time.Hour*24).Err()
-	if err != nil {
-		panic(err)
-	}
 }
 
 func migrateDeviceGatewayFn(devEUI []byte) {
