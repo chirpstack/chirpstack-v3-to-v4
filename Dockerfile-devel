@@ -1,9 +1,9 @@
-FROM golang:1.18-alpine
+FROM golang:1.22-alpine
 
 ENV PROJECT_PATH=/chirpstack-v3-to-v4
 
 RUN apk add --no-cache make git bash
-RUN go install github.com/goreleaser/goreleaser@latest
+RUN go install github.com/goreleaser/goreleaser@v1.25.1
 RUN git config --global --add safe.directory $PROJECT_PATH
 
 RUN mkdir -p $PROJECT_PATH
