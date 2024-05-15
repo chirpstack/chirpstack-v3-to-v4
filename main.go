@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -742,7 +743,7 @@ func migrateMulticastGroupsFn() {
 		"group_type",
 		"dr",
 		"frequency",
-		"class_b_ping_slot_period",
+		"class_b_ping_slot_nb_k",
 		"class_c_scheduling_type",
 	))
 	if err != nil {
@@ -759,6 +760,11 @@ func migrateMulticastGroupsFn() {
 
 			found = true
 
+			pingSlotNbK := nsMCGroup.PingSlotPeriod
+			if pingSlotNbK != 0 {
+				pingSlotNbK = uint32(math.Log2(float64(pingSlotNbK) / 32.0))
+			}
+
 			_, err = stmt.Exec(
 				nsMCGroup.ID,
 				intToUUID(asMCGroup.ApplicationID),
@@ -773,7 +779,7 @@ func migrateMulticastGroupsFn() {
 				nsMCGroup.GroupType,
 				nsMCGroup.DR,
 				nsMCGroup.Frequency,
-				nsMCGroup.PingSlotPeriod,
+				pingSlotNbK,
 				"DELAY",
 			)
 			if err != nil {
@@ -1532,6 +1538,7 @@ func migrateDeviceProfilesFn() {
 		"relay_global_uplink_limit_bucket_size",
 		"relay_overall_limit_bucket_size",
 		"allow_roaming",
+		"rx1_delay",
 	))
 	if err != nil {
 		log.Fatal("Prepare device-profile statement error", err)
@@ -1625,6 +1632,7 @@ function encodeDownlink(input) {
 				0,
 				0,
 				true,
+				0,
 			)
 			if err != nil {
 				log.Fatal("Exec device-profile statement error", err)
