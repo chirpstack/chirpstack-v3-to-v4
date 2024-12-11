@@ -1917,13 +1917,20 @@ func migrateDeviceKeysFn(tx *sqlx.Tx, devEUIs [][]byte) {
 			}
 		}
 
+		devNoncesJSON, err := json.Marshal(map[string][]int64{
+			"0000000000000000": devNonces,
+		})
+		if err != nil {
+			log.Fatal("Marshal DevNonces error")
+		}
+
 		_, err = stmt.Exec(
 			dk.DevEUI,
 			dk.CreatedAt,
 			dk.UpdatedAt,
 			dk.NwkKey,
 			dk.AppKey,
-			pq.Int64Array(devNonces),
+			string(devNoncesJSON),
 			dk.JoinNonce,
 		)
 		if err != nil {
