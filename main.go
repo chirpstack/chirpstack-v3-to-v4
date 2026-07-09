@@ -1696,6 +1696,20 @@ func migrateDevicesFn() {
 		IsDisabled                bool          `db:"-"`
 	}
 
+	type DeviceRow struct {
+		NSDevice NSDevice
+		ASDevice ASDevice
+		DevEUI   lorawan.EUI64
+		AppSKey  lorawan.AES128Key
+	}
+
+	type DeviceSessionCommand struct {
+		Index  int
+		DevEUI lorawan.EUI64
+		AppSKey lorawan.AES128Key
+		Cmd    *redis.StringCmd
+	}
+
 	appSKeys := map[lorawan.EUI64]lorawan.AES128Key{}
 	nsDevices := []NSDevice{}
 	asDevices := []ASDevice{}
@@ -1719,6 +1733,12 @@ func migrateDevicesFn() {
 	err := asDB.Select(&asDevices, "select * from device where dev_eui = any($1)", pq.ByteaArray(deviceIDs))
 	if err != nil {
 		log.Fatal("Select devices error", err)
+	}
+
+	asDevicesByDevEUI := make(map[string][]ASDevice, len(asDevices))
+	for _, asDev := range asDevices {
+		devEUIKey := string(asDev.DevEUI)
+		asDevicesByDevEUI[devEUIKey] = append(asDevicesByDevEUI[devEUIKey], asDev)
 	}
 
 	tx, err := csDB.Beginx()
@@ -1757,63 +1777,79 @@ func migrateDevicesFn() {
 		log.Fatal("Prepare device statement error", err)
 	}
 
-	for _, nsDev := range nsDevices {
-		found := false
-
-		// In v3 this column can be an empty string. In v4 the default value is "A".
-		if strings.ReplaceAll(nsDev.Mode, " ", "") == "" {
-			nsDev.Mode = "A"
+	flushDeviceRows := func(rows []DeviceRow) {
+		if len(rows) == 0 {
+			return
 		}
 
-		for _, asDev := range asDevices {
-			if !bytes.Equal(asDev.DevEUI, nsDev.DevEUI) {
+		ctx := context.Background()
+		pipe := nsRedis.Pipeline()
+		sessionCommands := make([]DeviceSessionCommand, 0, len(rows))
+
+		for i, row := range rows {
+			sessionCommands = append(sessionCommands, DeviceSessionCommand{
+				Index:  i,
+				DevEUI: row.DevEUI,
+				AppSKey: row.AppSKey,
+				Cmd:    pipe.Get(ctx, getDeviceSessionKey(row.DevEUI[:])),
+			})
+		}
+
+		_, err := pipe.Exec(ctx)
+		if err != nil && err != redis.Nil {
+			panic(err)
+		}
+
+		deviceSessions := make([]*[]byte, len(rows))
+		deviceSessionDevAddrs := make([][]byte, len(rows))
+		for _, sessionCommand := range sessionCommands {
+			val, err := sessionCommand.Cmd.Bytes()
+			if err == redis.Nil {
 				continue
 			}
+			if err != nil {
+				panic(err)
+			}
 
-			found = true
+			ds := decodeDeviceSession(val, sessionCommand.AppSKey[:])
+			deviceSessionDevAddrs[sessionCommand.Index] = ds.DevAddr
 
-			var devEUI lorawan.EUI64
-			var appSKey lorawan.AES128Key
-			var deviceSession *[]byte
-
-			copy(devEUI[:], asDev.DevEUI)
-			copy(appSKey[:], asDev.AppSKey)
-			appSKeys[devEUI] = appSKey
-
-			ds, err := getDeviceSession(devEUI[:], appSKey[:])
+			b, err := proto.Marshal(&ds)
 			if err == nil {
-				// Make sure we have the DevAddr from the device-session
-				copy(asDev.DevAddr[:], ds.DevAddr)
+				deviceSessions[sessionCommand.Index] = &b
+			}
+		}
 
-				b, err := proto.Marshal(&ds)
-				if err == nil {
-					deviceSession = &b
-				}
+		for i, row := range rows {
+			deviceSession := deviceSessions[i]
+			if deviceSessionDevAddrs[i] != nil {
+				// Make sure we have the DevAddr from the device-session
+				copy(row.ASDevice.DevAddr[:], deviceSessionDevAddrs[i])
 			}
 
 			_, err = stmt.Exec(
-				nsDev.DevEUI,
-				intToUUID(asDev.ApplicationID),
-				asDev.DeviceProfileID,
-				asDev.CreatedAt,
-				asDev.UpdatedAt,
-				asDev.LastSeenAt,
+				row.NSDevice.DevEUI,
+				intToUUID(row.ASDevice.ApplicationID),
+				row.ASDevice.DeviceProfileID,
+				row.ASDevice.CreatedAt,
+				row.ASDevice.UpdatedAt,
+				row.ASDevice.LastSeenAt,
 				time.Now(),
-				asDev.Name,
-				asDev.Description,
-				asDev.DeviceStatusExternalPower,
-				asDev.DeviceStatusBattery,
-				asDev.DeviceStatusMargin,
-				asDev.DR,
-				asDev.Latitude,
-				asDev.Longitude,
-				asDev.Altitude,
-				asDev.DevAddr,
-				nsDev.Mode,
-				nsDev.SkipFCntCheck,
-				nsDev.IsDisabled,
-				hstoreToJSON(asDev.Tags),
-				hstoreToJSON(asDev.Variables),
+				row.ASDevice.Name,
+				row.ASDevice.Description,
+				row.ASDevice.DeviceStatusExternalPower,
+				row.ASDevice.DeviceStatusBattery,
+				row.ASDevice.DeviceStatusMargin,
+				row.ASDevice.DR,
+				row.ASDevice.Latitude,
+				row.ASDevice.Longitude,
+				row.ASDevice.Altitude,
+				row.ASDevice.DevAddr,
+				row.NSDevice.Mode,
+				row.NSDevice.SkipFCntCheck,
+				row.NSDevice.IsDisabled,
+				hstoreToJSON(row.ASDevice.Tags),
+				hstoreToJSON(row.ASDevice.Variables),
 				[]byte{0, 0, 0, 0, 0, 0, 0, 0},
 				nil,
 				deviceSession,
@@ -1822,11 +1858,42 @@ func migrateDevicesFn() {
 				log.Fatal("Execute device statement error", err)
 			}
 		}
+	}
 
-		if !found {
+	deviceRows := make([]DeviceRow, 0, deviceSessionBatchSize)
+	for _, nsDev := range nsDevices {
+		// In v3 this column can be an empty string. In v4 the default value is "A".
+		if strings.ReplaceAll(nsDev.Mode, " ", "") == "" {
+			nsDev.Mode = "A"
+		}
+
+		matchingASDevices := asDevicesByDevEUI[string(nsDev.DevEUI)]
+		if len(matchingASDevices) == 0 {
 			log.Printf("Device not found in AS database, dev_eui: %s", hex.EncodeToString(nsDev.DevEUI))
+			continue
+		}
+
+		for _, asDev := range matchingASDevices {
+			var devEUI lorawan.EUI64
+			var appSKey lorawan.AES128Key
+
+			copy(devEUI[:], asDev.DevEUI)
+			copy(appSKey[:], asDev.AppSKey)
+			appSKeys[devEUI] = appSKey
+
+			deviceRows = append(deviceRows, DeviceRow{
+				NSDevice: nsDev,
+				ASDevice: asDev,
+				DevEUI:   devEUI,
+				AppSKey:  appSKey,
+			})
+			if len(deviceRows) >= deviceSessionBatchSize {
+				flushDeviceRows(deviceRows)
+				deviceRows = deviceRows[:0]
+			}
 		}
 	}
+	flushDeviceRows(deviceRows)
 
 	_, err = stmt.Exec()
 	if err != nil {
@@ -1852,10 +1919,7 @@ func migrateDevicesFn() {
 		}
 	}
 
-	log.Println("Migrate device <> gateway")
-	for devEUI := range appSKeys {
-		migrateDeviceGatewayFn(devEUI[:])
-	}
+	migrateDeviceGatewaysFn(appSKeys)
 
 	if disableMigratedDevices {
 		log.Println("Disable migrated devices")
@@ -1895,6 +1959,12 @@ func migrateDeviceKeysFn(tx *sqlx.Tx, devEUIs [][]byte) {
 		log.Fatal("Select device activation error", err)
 	}
 
+	devNoncesByDevEUI := make(map[string][]int64, len(devDevNonces))
+	for _, dn := range devDevNonces {
+		devEUIKey := string(dn.DevEUI)
+		devNoncesByDevEUI[devEUIKey] = append(devNoncesByDevEUI[devEUIKey], dn.DevNonce)
+	}
+
 	stmt, err := tx.Prepare(pq.CopyIn("device_keys",
 		"dev_eui",
 		"created_at",
@@ -1909,12 +1979,9 @@ func migrateDeviceKeysFn(tx *sqlx.Tx, devEUIs [][]byte) {
 	}
 
 	for _, dk := range deviceKeys {
-		devNonces := []int64{}
-
-		for _, dn := range devDevNonces {
-			if bytes.Equal(dn.DevEUI, dk.DevEUI) {
-				devNonces = append(devNonces, dn.DevNonce)
-			}
+		devNonces := devNoncesByDevEUI[string(dk.DevEUI)]
+		if devNonces == nil {
+			devNonces = []int64{}
 		}
 
 		devNoncesJSON, err := json.Marshal(map[string][]int64{
@@ -2037,10 +2104,14 @@ func hstoreToJSON(h hstore.Hstore) string {
 	return string(b)
 }
 
-func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error) {
-	key := fmt.Sprintf("%slora:ns:device:%s", nsPrefix, hex.EncodeToString(devEUI))
-	var dsOld pbold.DeviceSessionPB
+const deviceSessionBatchSize = 1000
 
+func getDeviceSessionKey(devEUI []byte) string {
+	return fmt.Sprintf("%slora:ns:device:%s", nsPrefix, hex.EncodeToString(devEUI))
+}
+
+func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error) {
+	key := getDeviceSessionKey(devEUI)
 	val, err := nsRedis.Get(context.Background(), key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
@@ -2051,7 +2122,13 @@ func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error
 
 	}
 
-	err = proto.Unmarshal(val, &dsOld)
+	return decodeDeviceSession(val, appSKey), nil
+}
+
+func decodeDeviceSession(val []byte, appSKey []byte) pbnew.DeviceSession {
+	var dsOld pbold.DeviceSessionPB
+
+	err := proto.Unmarshal(val, &dsOld)
 	if err != nil {
 		panic(err)
 	}
@@ -2132,33 +2209,89 @@ func getDeviceSession(devEUI []byte, appSKey []byte) (pbnew.DeviceSession, error
 		})
 	}
 
-	return dsNew, nil
+	return dsNew
 }
 
-func migrateDeviceGatewayFn(devEUI []byte) {
-	devGW, err := getDeviceGateway(devEUI)
-	if err != nil {
+const deviceGatewayBatchSize = 1000
+
+func migrateDeviceGatewaysFn(appSKeys map[lorawan.EUI64]lorawan.AES128Key) {
+	log.Println("Migrate device <> gateway")
+
+	batch := make([]lorawan.EUI64, 0, deviceGatewayBatchSize)
+	for devEUI := range appSKeys {
+		batch = append(batch, devEUI)
+		if len(batch) >= deviceGatewayBatchSize {
+			migrateDeviceGatewayBatch(batch)
+			batch = batch[:0]
+		}
+	}
+
+	migrateDeviceGatewayBatch(batch)
+}
+
+func migrateDeviceGatewayBatch(devEUIs []lorawan.EUI64) {
+	if len(devEUIs) == 0 {
 		return
 	}
 
-	saveDeviceGateway(devGW)
-}
+	type getCommand struct {
+		devEUI lorawan.EUI64
+		cmd    *redis.StringCmd
+	}
 
-func getDeviceGateway(devEUI []byte) (pbnew.DeviceGatewayRxInfo, error) {
-	key := fmt.Sprintf("%slora:ns:device:%s:gwrx", nsPrefix, hex.EncodeToString(devEUI))
-	var devGWOld pbold.DeviceGatewayRXInfoSetPB
+	ctx := context.Background()
+	getPipe := nsRedis.Pipeline()
+	getCommands := make([]getCommand, 0, len(devEUIs))
 
-	val, err := nsRedis.Get(context.Background(), key).Bytes()
-	if err != nil {
+	for _, devEUI := range devEUIs {
+		key := fmt.Sprintf("%slora:ns:device:%s:gwrx", nsPrefix, hex.EncodeToString(devEUI[:]))
+		getCommands = append(getCommands, getCommand{
+			devEUI: devEUI,
+			cmd:    getPipe.Get(ctx, key),
+		})
+	}
+
+	_, err := getPipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		log.Fatal("Get device gateway batch error", err)
+	}
+
+	setPipe := csRedis.Pipeline()
+	setCount := 0
+	for _, getCommand := range getCommands {
+		val, err := getCommand.cmd.Bytes()
 		if err == redis.Nil {
-			return pbnew.DeviceGatewayRxInfo{}, err
-		} else {
+			continue
+		}
+		if err != nil {
+			log.Fatalf("Get device gateway error, dev_eui: %s, error: %s", hex.EncodeToString(getCommand.devEUI[:]), err)
+		}
+
+		devGW := decodeDeviceGateway(val)
+		key := fmt.Sprintf("%sdevice:{%s}:gwrx", nsPrefix, hex.EncodeToString(devGW.DevEui))
+		b, err := proto.Marshal(&devGW)
+		if err != nil {
 			panic(err)
 		}
 
+		setPipe.Set(ctx, key, b, time.Duration(csSessionTTL)*time.Hour*24)
+		setCount++
 	}
 
-	err = proto.Unmarshal(val, &devGWOld)
+	if setCount == 0 {
+		return
+	}
+
+	_, err = setPipe.Exec(ctx)
+	if err != nil {
+		log.Fatal("Save device gateway batch error", err)
+	}
+}
+
+func decodeDeviceGateway(val []byte) pbnew.DeviceGatewayRxInfo {
+	var devGWOld pbold.DeviceGatewayRXInfoSetPB
+
+	err := proto.Unmarshal(val, &devGWOld)
 	if err != nil {
 		panic(err)
 	}
@@ -2180,20 +2313,7 @@ func getDeviceGateway(devEUI []byte) (pbnew.DeviceGatewayRxInfo, error) {
 		})
 	}
 
-	return devGW, nil
-}
-
-func saveDeviceGateway(devGW pbnew.DeviceGatewayRxInfo) {
-	key := fmt.Sprintf("%sdevice:{%s}:gwrx", nsPrefix, hex.EncodeToString(devGW.DevEui))
-	b, err := proto.Marshal(&devGW)
-	if err != nil {
-		panic(err)
-	}
-
-	err = csRedis.Set(context.Background(), key, b, time.Duration(csSessionTTL)*time.Hour*24).Err()
-	if err != nil {
-		panic(err)
-	}
+	return devGW
 }
 
 func migrateDeviceMetricsFn(devEUI []byte) {
